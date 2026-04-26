@@ -13,7 +13,7 @@ use crate::{
     target::{self, Uint256},
     Error, Hash,
 };
-use kaspa_miner::Worker;
+use keryx_miner::Worker;
 
 mod hasher;
 mod heavy_hash;
@@ -58,6 +58,7 @@ impl BlockSeed {
 
 #[derive(Clone)]
 pub struct State {
+    #[allow(dead_code)]
     pub id: usize,
     matrix: Arc<Matrix>,
     pub target: Uint256,

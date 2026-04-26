@@ -4,8 +4,8 @@ use cust::device::DeviceAttribute;
 use cust::function::Function;
 use cust::module::{ModuleJitOption, OptLevel};
 use cust::prelude::*;
-use kaspa_miner::xoshiro256starstar::Xoshiro256StarStar;
-use kaspa_miner::Worker;
+use keryx_miner::xoshiro256starstar::Xoshiro256StarStar;
+use keryx_miner::Worker;
 use log::{error, info};
 use rand::{Fill, RngCore};
 use std::ffi::CString;
@@ -13,11 +13,11 @@ use std::sync::{Arc, Weak};
 
 static BPS: f32 = 1.;
 
-static PTX_86: &str = include_str!("../resources/kaspa-cuda-sm86.ptx");
-static PTX_75: &str = include_str!("../resources/kaspa-cuda-sm75.ptx");
-static PTX_61: &str = include_str!("../resources/kaspa-cuda-sm61.ptx");
-static PTX_30: &str = include_str!("../resources/kaspa-cuda-sm30.ptx");
-static PTX_20: &str = include_str!("../resources/kaspa-cuda-sm20.ptx");
+static PTX_86: &str = include_str!("../resources/keryx-cuda-sm86.ptx");
+static PTX_75: &str = include_str!("../resources/keryx-cuda-sm75.ptx");
+static PTX_61: &str = include_str!("../resources/keryx-cuda-sm61.ptx");
+// sm_30 (Kepler) and sm_20 (Fermi) dropped: CUDA 12+ no longer compiles for
+// these architectures, and they predate practical GPU mining anyway.
 
 pub struct Kernel<'kernel> {
     func: Arc<Function<'kernel>>,
@@ -175,18 +175,12 @@ impl<'gpu> CudaGPUWorker<'gpu> {
                 error!("Error loading PTX. Make sure you have the updated driver for you devices");
                 e
             })?);
-        } else if major >= 3 {
-            _module = Arc::new(Module::from_ptx(PTX_30, &[ModuleJitOption::OptLevel(OptLevel::O4)]).map_err(|e| {
-                error!("Error loading PTX. Make sure you have the updated driver for you devices");
-                e
-            })?);
-        } else if major >= 2 {
-            _module = Arc::new(Module::from_ptx(PTX_20, &[ModuleJitOption::OptLevel(OptLevel::O4)]).map_err(|e| {
-                error!("Error loading PTX. Make sure you have the updated driver for you devices");
-                e
-            })?);
         } else {
-            return Err("Cuda compute version not supported".into());
+            return Err(format!(
+                "CUDA compute {}.{} not supported. Keryx requires sm_61 (GTX 10xx) or newer.",
+                major, minor
+            )
+            .into());
         }
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;

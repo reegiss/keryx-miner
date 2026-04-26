@@ -172,6 +172,52 @@ STATIC inline void keccakf(void *state) {
 constant const ulong powP[25] = { 0x113cff0da1f6d83dUL, 0x29bf8855b7027e3cUL, 0x1e5f2e720efb44d2UL, 0x1ba5a4a3f59869a0UL, 0x7b2fafca875e2d65UL, 0x4aef61d629dce246UL, 0x183a981ead415b10UL, 0x776bf60c789bc29cUL, 0xf8ebf13388663140UL, 0x2e651c3c43285ff0UL, 0x0f96070540f14a0aUL, 0x44e367875b299152UL, 0xec70f1a425b13715UL, 0xe6c85d8f82e9da89UL, 0xb21a601f85b4b223UL, 0x3485549064a36a46UL, 0x0f06dd1c7a2f851aUL, 0xc1a2021d563bb142UL, 0xba1de5e4451668e4UL, 0xd102574105095f8dUL, 0x89ca4e849bcecf4aUL, 0x48b09427a8742edbUL, 0xb1fcce9ce78b5272UL, 0x5d1129cf82afa5bcUL, 0x02b97c786f824383UL };
 constant const ulong heavyP[25] = { 0x3ad74c52b2248509UL, 0x79629b0e2f9f4216UL, 0x7a14ff4816c7f8eeUL, 0x11a75f4c80056498UL, 0xe720e0df44eecedaUL, 0x72c7d82e14f34069UL, 0xc100ff2a938935baUL, 0x5e219040250fc462UL, 0x8039f9a60dcf6a48UL, 0xa0bcaa9f792a3d0cUL, 0xf431c05dd0a9a226UL, 0xd31f4cc354c18c3fUL, 0x6c6b7d01a769cc3dUL, 0x2ec65bd3562493e4UL, 0x4ef74b3a99cdb044UL, 0x774c86835434f2b0UL, 0x07e961b036bc9416UL, 0x7e8f1db17765cc07UL, 0xea8fdb80bac46d39UL, 0xb992f2d37b34ca58UL, 0xc776c5048481b957UL, 0x47c39f675112c22eUL, 0x92bb399db5290c0aUL, 0x549ae0312f9fc615UL, 0x1619327d10b9da35UL };
 
+/* ======================================================================
+ * KERYX WAVE-MIX — ARX post-processing after matrix multiply
+ *
+ * Implements `fn wave_mix()` from consensus/pow/src/matrix.rs exactly.
+ * Must be called on the 32-byte matrix-product BEFORE the final
+ * KeryxHash (heavyP) Keccak absorption.
+ *
+ * Round constants (must NOT be changed — changing them = hard fork):
+ *   WAVE_MIX_KEYS[0] = 0x9e3779b97f4a7c15  (frac. bits of φ)
+ *   WAVE_MIX_KEYS[1] = 0x6c62272e07bb0142  (Keryx network discriminator)
+ *   WAVE_MIX_KEYS[2] = 0xb5ad4eceda1ce2a9  (frac. bits of √3)
+ *   WAVE_MIX_KEYS[3] = 0x243f6a8885a308d3  (frac. bits of π)
+ * Rotation schedule: [17, 47, 31, 13]
+ * ====================================================================== */
+constant STATIC const ulong WAVE_MIX_KEYS[4] = {
+    0x9e3779b97f4a7c15UL,
+    0x6c62272e07bb0142UL,
+    0xb5ad4eceda1ce2a9UL,
+    0x243f6a8885a308d3UL,
+};
+
+/* Apply 4 rounds of ARX to the 32-byte hash stored in h->hash (ulong4 LE).
+ * Uses plain 64-bit shifts — safe on AMD and NVIDIA alike. */
+STATIC inline void wave_mix_hash(Hash *h) {
+    ulong w0 = h->hash.x;
+    ulong w1 = h->hash.y;
+    ulong w2 = h->hash.z;
+    ulong w3 = h->hash.w;
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        /* Step A — vertical pairs: (w0,w1) and (w2,w3) are independent
+         * and can be issued in parallel by a GPU warp. */
+        w0 += w1; w0 = (w0 << 17) | (w0 >> 47); w0 ^= WAVE_MIX_KEYS[r & 3];
+        w2 += w3; w2 = (w2 << 47) | (w2 >> 17); w2 ^= WAVE_MIX_KEYS[(r + 2) & 3];
+        /* Step B — diagonal pairs: cross-pollinate all 256 bits. */
+        w1 += w2; w1 = (w1 << 31) | (w1 >> 33); w1 ^= WAVE_MIX_KEYS[(r + 1) & 3];
+        w3 += w0; w3 = (w3 << 13) | (w3 >> 51); w3 ^= WAVE_MIX_KEYS[(r + 3) & 3];
+    }
+
+    h->hash.x = w0;
+    h->hash.y = w1;
+    h->hash.z = w2;
+    h->hash.w = w3;
+}
+
 /** The sponge-based hash construction. **/
 STATIC inline void hash(constant const ulong *initP, const ulong* in, ulong4* out) {
   private ulong a[25];
@@ -387,6 +433,11 @@ kernel void heavy_hash(
 //        hash2_.bytes[rowId] = hash_.bytes[rowId] ^ bitselect(product1, product2, 0x0000000FU);
         hash2_.bytes[rowId] = hash_.bytes[rowId] ^ ((uint8_t)((product1 << 4) | (uint8_t)(product2)));
     }
+    /* Keryx wave-mix: ARX post-processing step (see wave_mix_hash above).
+     * Nodes that skip this produce a different hash and can never satisfy
+     * the target — protocol compliance is enforced implicitly. */
+    wave_mix_hash(&hash2_);
+
     buffer[0] = hash2_.hash.x;
     buffer[1] = hash2_.hash.y;
     buffer[2] = hash2_.hash.z;

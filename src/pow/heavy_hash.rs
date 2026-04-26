@@ -2,31 +2,60 @@ use crate::pow::{hasher::HeavyHasher, xoshiro::XoShiRo256PlusPlus};
 use crate::Hash;
 use std::mem::MaybeUninit;
 
+/// Domain-separation salt — must match `KERYX_MATRIX_SALT` in
+/// `consensus/pow/src/matrix.rs` exactly or the miner will derive a different
+/// matrix than the node and every submitted block will be rejected.
+const KERYX_MATRIX_SALT: [u8; 32] = *b"KERYX:KeryxHash-v1:2026-04-12:xx";
+
+/// Round constants for wave_mix — same as `WAVE_MIX_KEYS` in matrix.rs.
+const WAVE_MIX_KEYS: [u64; 4] = [
+    0x9e3779b97f4a7c15,
+    0x6c62272e07bb0142,
+    0xb5ad4eceda1ce2a9,
+    0x243f6a8885a308d3,
+];
+
+/// Rotation amounts — same as `WAVE_MIX_ROTATIONS` in matrix.rs.
+const WAVE_MIX_ROTATIONS: [u32; 4] = [17, 31, 47, 13];
+
+/// 4-round ARX post-processing — must be bit-for-bit identical to
+/// `fn wave_mix()` in `consensus/pow/src/matrix.rs`.
+#[inline(always)]
+fn wave_mix(bytes: [u8; 32]) -> [u8; 32] {
+    let mut w = [
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+        u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+    ];
+    for r in 0..4usize {
+        w[0] = w[0].wrapping_add(w[1]).rotate_left(WAVE_MIX_ROTATIONS[0]) ^ WAVE_MIX_KEYS[r & 3];
+        w[2] = w[2].wrapping_add(w[3]).rotate_left(WAVE_MIX_ROTATIONS[2]) ^ WAVE_MIX_KEYS[(r + 2) & 3];
+        w[1] = w[1].wrapping_add(w[2]).rotate_left(WAVE_MIX_ROTATIONS[1]) ^ WAVE_MIX_KEYS[(r + 1) & 3];
+        w[3] = w[3].wrapping_add(w[0]).rotate_left(WAVE_MIX_ROTATIONS[3]) ^ WAVE_MIX_KEYS[(r + 3) & 3];
+    }
+    let mut out = [0u8; 32];
+    out[0..8].copy_from_slice(&w[0].to_le_bytes());
+    out[8..16].copy_from_slice(&w[1].to_le_bytes());
+    out[16..24].copy_from_slice(&w[2].to_le_bytes());
+    out[24..32].copy_from_slice(&w[3].to_le_bytes());
+    out
+}
+
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Matrix(pub [[u16; 64]; 64]);
 
 impl Matrix {
-    // pub fn generate(hash: Hash) -> Self {
-    //     let mut generator = XoShiRo256PlusPlus::new(hash);
-    //     let mut mat = Matrix([[0u16; 64]; 64]);
-    //     loop {
-    //         for i in 0..64 {
-    //             for j in (0..64).step_by(16) {
-    //                 let val = generator.u64();
-    //                 for shift in 0..16 {
-    //                     mat.0[i][j + shift] = (val >> (4 * shift) & 0x0F) as u16;
-    //                 }
-    //             }
-    //         }
-    //         if mat.compute_rank() == 64 {
-    //             return mat;
-    //         }
-    //     }
-    // }
-
     #[inline(always)]
     pub fn generate(hash: Hash) -> Self {
-        let mut generator = XoShiRo256PlusPlus::new(hash);
+        // XOR the block-hash seed with the Keryx domain salt before the PRNG.
+        // Must match Matrix::generate() in consensus/pow/src/matrix.rs.
+        let salted = {
+            let mut bytes = hash.to_le_bytes();
+            bytes.iter_mut().zip(KERYX_MATRIX_SALT.iter()).for_each(|(b, s)| *b ^= s);
+            Hash::from_le_bytes(bytes)
+        };
+        let mut generator = XoShiRo256PlusPlus::new(salted);
         loop {
             let mat = Self::rand_matrix_no_rank_check(&mut generator);
             if mat.compute_rank() == 64 {
@@ -122,6 +151,10 @@ impl Matrix {
 
         // Concatenate 4 LSBs back to 8 bit xor with sum1
         product.iter_mut().zip(hash).for_each(|(p, h)| *p ^= h);
+
+        // Keryx wave-mix: ARX post-processing — must match the node's matrix.rs.
+        let product = wave_mix(product);
+
         HeavyHasher::hash(Hash::from_le_bytes(product))
     }
 }

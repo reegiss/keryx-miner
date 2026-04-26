@@ -24,6 +24,7 @@ use log::{error, info, warn};
 use num::Float;
 use rand::{thread_rng, RngCore};
 use statum_codec::NewLineJsonCodec;
+use std::sync::OnceLock;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::Mutex;
 use tokio::task;
@@ -47,7 +48,7 @@ pub struct ShareStats {
     pub shares_pending: Mutex<HashMap<u32, String>>,
 }
 
-static mut SHARE_STATS: Option<Arc<ShareStats>> = None;
+static SHARE_STATS: OnceLock<Arc<ShareStats>> = OnceLock::new();
 
 impl Display for ShareStats {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -189,12 +190,7 @@ impl StratumHandler {
         let (sink, stream) = client.split();
         tokio::spawn(async move { ReceiverStream::new(recv).map(Ok).forward(sink).await });
 
-        let share_state = unsafe {
-            if SHARE_STATS.is_none() {
-                SHARE_STATS = Some(Arc::new(ShareStats::default()));
-            }
-            SHARE_STATS.clone().unwrap()
-        };
+        let share_state = SHARE_STATS.get_or_init(|| Arc::new(ShareStats::default())).clone();
         let last_stratum_id = Arc::new(AtomicU32::new(0));
         let (block_channel, block_handle) = Self::create_block_channel(
             send_channel.clone(),

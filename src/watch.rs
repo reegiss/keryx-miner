@@ -174,6 +174,7 @@ impl Display for ChannelClosed {
 
 impl Error for ChannelClosed {}
 
+#[allow(unexpected_cfgs)]
 mod sync {
     #[cfg(all(feature = "parking_lot", feature = "shuttle"))]
     compile_error!("Can't use sync primitives both from parking_lot and from shuttle");
@@ -204,13 +205,13 @@ mod sync {
         thread,
     };
     #[cfg(not(feature = "shuttle"))]
-    pub use std::{
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Barrier,
-        },
-        thread,
+    pub use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     };
+
+    #[cfg(all(not(feature = "shuttle"), test))]
+    pub use std::{sync::Barrier, thread};
 
     pub struct Mutex<T>(MutexInternal<T>);
     impl<T> Mutex<T> {
@@ -219,7 +220,7 @@ mod sync {
         }
 
         #[inline(always)]
-        pub fn lock(&self) -> MutexGuard<T> {
+        pub fn lock(&self) -> MutexGuard<'_, T> {
             #[cfg(not(feature = "parking_lot"))]
             return self.0.lock().unwrap_or_else(|e| e.into_inner());
             #[cfg(feature = "parking_lot")]
@@ -259,7 +260,7 @@ mod sync {
         }
 
         #[inline(always)]
-        pub fn read(&self) -> RwLockReadGuard<T> {
+        pub fn read(&self) -> RwLockReadGuard<'_, T> {
             #[cfg(not(feature = "parking_lot"))]
             return self.0.read().unwrap_or_else(|e| e.into_inner());
             #[cfg(feature = "parking_lot")]
@@ -267,7 +268,7 @@ mod sync {
         }
 
         #[inline(always)]
-        pub fn write(&self) -> RwLockWriteGuard<T> {
+        pub fn write(&self) -> RwLockWriteGuard<'_, T> {
             #[cfg(not(feature = "parking_lot"))]
             return self.0.write().unwrap_or_else(|e| e.into_inner());
             #[cfg(feature = "parking_lot")]
@@ -277,6 +278,7 @@ mod sync {
 }
 
 #[cfg(test)]
+#[allow(unexpected_cfgs)]
 mod tests {
     use crate::watch::{
         self,

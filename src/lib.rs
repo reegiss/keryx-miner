@@ -2,6 +2,8 @@ use clap::ArgMatches;
 use std::any::Any;
 use std::error::Error as StdError;
 
+pub mod inference;
+pub mod slm;
 pub mod xoshiro256starstar;
 use libloading::{Library, Symbol};
 
