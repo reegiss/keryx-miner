@@ -1,7 +1,7 @@
 use crate::proto::{
     kaspad_message::Payload, GetBlockRequestMessage, GetBlockTemplateRequestMessage, GetInfoRequestMessage,
     KaspadMessage, NotifyBlockAddedRequestMessage, NotifyNewBlockTemplateRequestMessage, RpcBlock,
-    SubmitBlockRequestMessage,
+    RpcTransaction, SubmitBlockRequestMessage, SubmitTransactionRequestMessage,
 };
 use crate::{
     pow::{self, HeaderHasher},
@@ -24,6 +24,16 @@ impl KaspadMessage {
             payload: Some(Payload::SubmitBlockRequest(SubmitBlockRequestMessage {
                 block: Some(block),
                 allow_non_daa_blocks: false,
+            })),
+        }
+    }
+
+    #[inline(always)]
+    pub fn submit_transaction(tx: RpcTransaction) -> Self {
+        KaspadMessage {
+            payload: Some(Payload::SubmitTransactionRequest(SubmitTransactionRequestMessage {
+                transaction: Some(tx),
+                allow_orphan: false,
             })),
         }
     }

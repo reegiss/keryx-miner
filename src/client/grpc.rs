@@ -38,20 +38,17 @@ pub struct KeryxdHandler {
     block_channel: Sender<BlockSeed>,
     block_handle: BlockHandle,
 
-    /// Queue of AiRequests seen in confirmed blocks or mempool, waiting for inference.
-    /// Each entry: (payload_prefix_16, prompt, max_tokens).
+    /// Queue of AiRequests waiting for inference.
+    /// Each entry: (stable_id_hex16, raw_payload_bytes).
     /// Fed by both BlockAdded scans and block template scans.
-    ai_request_queue: VecDeque<(String, String, usize)>,
+    ai_request_queue: VecDeque<(String, Vec<u8>)>,
 
-    /// Prefixes already queued or in-flight — used for deduplication.
+    /// Stable IDs already queued or in-flight — used for deduplication.
     ai_seen_prefixes: std::collections::HashSet<String>,
 
-    /// Pending AI response tag ready to embed in the next coinbase extra_data.
-    /// Format: "ai:r:{payload_prefix_16}:{base64_result}"
-    pending_ai_response: Option<String>,
-
-    /// In-flight SLM inference task: (payload_prefix, result_receiver).
-    inference_rx: Option<(String, oneshot::Receiver<String>)>,
+    /// In-flight SLM inference task: (request_raw_bytes, result_receiver).
+    /// The raw bytes are kept to build the AiResponse tx when inference completes.
+    inference_rx: Option<(Vec<u8>, oneshot::Receiver<String>)>,
 
     /// 64-char hex Schnorr pubkey for the OPoI escrow output.
     /// `Some` → 10% of this miner's blue-block rewards go to this key (recoverable).
@@ -117,7 +114,6 @@ impl KeryxdHandler {
             block_handle,
             ai_request_queue: VecDeque::new(),
             ai_seen_prefixes: std::collections::HashSet::new(),
-            pending_ai_response: None,
             inference_rx: None,
             escrow_pubkey,
         }))
@@ -158,21 +154,13 @@ impl KeryxdHandler {
         let nonce_hex = format!("{:016x}", thread_rng().next_u64());
         // OPoI Phase 2: run the deterministic fixed-point MLP (matches node validation).
         let opoi_tag = keryx_miner::inference::compute_opoi_tag(&nonce_hex);
-        // Embed the pending AI response in every template request until a block is
-        // successfully submitted. Using clone (not take) so the response survives
-        // template rotations — at 10 BPS most templates are replaced before the
-        // miner finds a valid nonce, so a single take() would silently drop responses.
-        let ai_response = self.pending_ai_response
-            .as_deref()
-            .map(|r| format!("/{}", r))
-            .unwrap_or_default();
         // OPoI escrow: if a Schnorr pubkey is configured, embed it so the node can route
-        // the 10% escrow cut to a recoverable output instead of burning it.
+        // the 20% escrow cut to a recoverable output instead of burning it.
         let escrow_part = self.escrow_pubkey
             .as_deref()
             .map(|pk| format!("/escrow:{}", pk))
             .unwrap_or_default();
-        let extra_data = format!("{}{}/{}/ai:v1:{}{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag, ai_response);
+        let extra_data = format!("{}{}/{}/ai:v1:{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag);
         self.client_send(GetBlockTemplateRequestMessage { pay_address, extra_data }).await
     }
 
@@ -180,17 +168,18 @@ impl KeryxdHandler {
     /// entries into `ai_request_queue` (deduplication by prefix).
     fn scan_txs_for_ai_requests(&mut self, txs: &[crate::proto::RpcTransaction]) {
         for tx in txs {
-            // Only process SUBNETWORK_ID_AI_REQUEST transactions (0x03…).
             if tx.subnetwork_id != keryx_inference::SUBNETWORK_ID_AI_REQUEST_HEX {
                 continue;
             }
-            if let Some((prefix, prompt, max_tokens)) =
-                keryx_miner::inference::extract_ai_request(&tx.payload)
-            {
-                if !self.ai_seen_prefixes.contains(&prefix) {
-                    info!("OPoI: queued AiRequest prefix={}", prefix);
-                    self.ai_seen_prefixes.insert(prefix.clone());
-                    self.ai_request_queue.push_back((prefix, prompt, max_tokens));
+            if let Ok(raw) = hex::decode(&tx.payload) {
+                if keryx_inference::AiRequestPayload::deserialize(&raw).is_some() {
+                    let hash = blake2b_simd::blake2b(&raw);
+                    let stable_id = hex::encode(&hash.as_bytes()[..8]);
+                    if !self.ai_seen_prefixes.contains(&stable_id) {
+                        info!("OPoI: queued AiRequest id={}", stable_id);
+                        self.ai_seen_prefixes.insert(stable_id.clone());
+                        self.ai_request_queue.push_back((stable_id, raw));
+                    }
                 }
             }
         }
@@ -199,37 +188,56 @@ impl KeryxdHandler {
     /// Starts SLM inference for the next queued AiRequest, if no inference is
     /// already in flight and a response slot is free.
     fn try_start_inference(&mut self) {
-        if self.pending_ai_response.is_some() || self.inference_rx.is_some() {
+        if self.inference_rx.is_some() {
             return;
         }
-        if let Some((prefix, prompt, max_tokens)) = self.ai_request_queue.pop_front() {
-            info!("OPoI: spawning SLM inference for prefix={}", prefix);
-            let (tx_done, rx_done) = oneshot::channel::<String>();
-            tokio::task::spawn_blocking(move || {
-                let result = keryx_miner::slm::run_inference(&prompt, max_tokens);
-                let _ = tx_done.send(result);
-            });
-            self.inference_rx = Some((prefix, rx_done));
+        if let Some((_stable_id, raw)) = self.ai_request_queue.pop_front() {
+            if let Some(req) = keryx_inference::AiRequestPayload::deserialize(&raw) {
+                let prompt = String::from_utf8_lossy(&req.prompt).into_owned();
+                let max_tokens = req.max_tokens as usize;
+                info!("OPoI: spawning SLM inference (max_tokens={})", max_tokens);
+                let (tx_done, rx_done) = oneshot::channel::<String>();
+                tokio::task::spawn_blocking(move || {
+                    let result = keryx_miner::slm::run_inference(&prompt, max_tokens);
+                    let _ = tx_done.send(result);
+                });
+                self.inference_rx = Some((raw, rx_done));
+            }
         }
     }
 
-    /// Polls the in-flight inference task and promotes the result to
-    /// `pending_ai_response` when ready.
-    fn poll_inference(&mut self) {
-        if self.pending_ai_response.is_some() {
-            return;
-        }
-        if let Some((ref prefix, ref mut rx)) = self.inference_rx {
-            if let Ok(result) = rx.try_recv() {
-                use base64::Engine as _;
-                let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(result.as_bytes());
-                let tag = format!("ai:r:{}:{}", prefix, encoded);
-                info!("OPoI: inference complete, queued response {}", tag);
-                self.pending_ai_response = Some(tag);
-                self.inference_rx = None;
-            }
-        }
+    /// Polls the in-flight inference task; when done, submits a proper
+    /// SUBNETWORK_ID_AI_RESPONSE transaction to keryxd (Phase 3).
+    fn poll_inference(&mut self) -> Option<crate::proto::RpcTransaction> {
+        let (ref raw, ref mut rx) = self.inference_rx.as_mut()?;
+        let result = rx.try_recv().ok()?;
+
+        // Build request_hash = blake2b(request_raw)[0..32]
+        let full_hash = blake2b_simd::blake2b(raw);
+        let mut request_hash = [0u8; 32];
+        request_hash.copy_from_slice(&full_hash.as_bytes()[..32]);
+
+        let response_payload = keryx_inference::AiResponsePayload::new(
+            request_hash,
+            0, // challenge_window_end: computed by node on inclusion
+            result.into_bytes(),
+        );
+
+        let tx = crate::proto::RpcTransaction {
+            version: 0,
+            inputs: vec![],
+            outputs: vec![],
+            lock_time: 0,
+            subnetwork_id: keryx_inference::SUBNETWORK_ID_AI_RESPONSE_HEX.to_string(),
+            gas: 0,
+            payload: hex::encode(response_payload.serialize()),
+            mass: 0,
+            verbose_data: None,
+        };
+
+        self.inference_rx = None;
+        info!("OPoI: inference complete, submitting AiResponse tx");
+        Some(tx)
     }
 
     async fn handle_message(&mut self, msg: Payload, miner: &mut MinerManager) -> Result<(), Error> {
@@ -262,8 +270,10 @@ impl KeryxdHandler {
             }
             Payload::NewBlockTemplateNotification(_) => self.client_get_block_template().await?,
             Payload::GetBlockTemplateResponse(template) => {
-                // Poll any in-flight inference and scan mempool TXs.
-                self.poll_inference();
+                // Poll any in-flight inference; if done, submit the AiResponse tx on-chain.
+                if let Some(tx) = self.poll_inference() {
+                    self.client_send(KaspadMessage::submit_transaction(tx)).await?;
+                }
                 if let Some(ref block) = template.block {
                     self.scan_txs_for_ai_requests(&block.transactions.clone());
                 }
@@ -291,16 +301,12 @@ impl KeryxdHandler {
                 }
             }
             Payload::SubmitBlockResponse(res) => match res.error {
-                None => {
-                    info!("block submitted successfully!");
-                    // Clear the pending response — the block carrying it is now on-chain.
-                    // The next queued AiRequest (if any) will start on the next template.
-                    if self.pending_ai_response.take().is_some() {
-                        info!("OPoI: response committed on-chain, slot cleared");
-                        self.try_start_inference();
-                    }
-                }
+                None => info!("block submitted successfully!"),
                 Some(e) => warn!("Failed submitting block: {:?}", e),
+            },
+            Payload::SubmitTransactionResponse(res) => match res.error {
+                None => info!("OPoI: AiResponse tx submitted successfully"),
+                Some(e) => warn!("OPoI: failed submitting AiResponse tx: {:?}", e),
             },
             Payload::GetInfoResponse(info) => {
                 info!("Keryxd version: {}", info.server_version);
