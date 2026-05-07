@@ -180,8 +180,9 @@ impl KeryxdHandler {
     /// entries into `ai_request_queue` (deduplication by prefix).
     fn scan_txs_for_ai_requests(&mut self, txs: &[crate::proto::RpcTransaction]) {
         for tx in txs {
-            if tx.inputs.is_empty() {
-                continue; // skip coinbase
+            // Only process SUBNETWORK_ID_AI_REQUEST transactions (0x03…).
+            if tx.subnetwork_id != keryx_inference::SUBNETWORK_ID_AI_REQUEST_HEX {
+                continue;
             }
             if let Some((prefix, prompt, max_tokens)) =
                 keryx_miner::inference::extract_ai_request(&tx.payload)
