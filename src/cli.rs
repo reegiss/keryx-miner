@@ -31,16 +31,17 @@ pub struct Opt {
     pub mine_when_not_synced: bool,
 
     #[clap(
-        long = "escrow-pubkey",
-        help = "64-char hex Schnorr pubkey for the OPoI escrow output (enables 10% recovery instead of burn)"
+        long = "no-opoi",
+        help = "Disable OPoI escrow: the 20% escrow cut goes to the burn address instead of your wallet"
     )]
-    pub escrow_pubkey: Option<String>,
+    pub no_opoi: bool,
 
     #[clap(
-        long = "escrow-privkey",
-        help = "64-char hex Schnorr private key — derives escrow pubkey and enables automatic escrow claiming after the CSV window"
+        long = "escrow-key-file",
+        help = "Path to the OPoI escrow private key file (auto-generated on first run)",
+        default_value = "escrow.key"
     )]
-    pub escrow_privkey: Option<String>,
+    pub escrow_key_file: String,
 
     #[clap(
         long = "escrow-state-file",
@@ -48,6 +49,13 @@ pub struct Opt {
         default_value = "escrow_state.json"
     )]
     pub escrow_state_file: String,
+
+    // Advanced / backward-compat: prefer --escrow-key-file for new installs.
+    #[clap(long = "escrow-pubkey", hide = true)]
+    pub escrow_pubkey: Option<String>,
+
+    #[clap(long = "escrow-privkey", hide = true)]
+    pub escrow_privkey: Option<String>,
 
     #[clap(skip)]
     pub devfund_address: String,

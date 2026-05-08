@@ -264,6 +264,52 @@ impl EscrowWatcher {
     }
 }
 
+/// Load the OPoI escrow private key from `path`.
+/// If the file does not exist, generates a new random keypair, saves it, and logs the pubkey.
+/// The file contains exactly 64 lowercase hex characters (32-byte Schnorr private key).
+pub fn load_or_generate_key(path: &str) -> Result<String, String> {
+    use rand::RngCore;
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        let s = fs::read_to_string(p)
+            .map_err(|e| format!("Failed to read escrow key file '{}': {}", path, e))?;
+        let privkey = s.trim().to_string();
+        if privkey.len() != 64 || !privkey.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Escrow key file '{}' must contain exactly 64 hex chars — delete it to regenerate",
+                path
+            ));
+        }
+        return Ok(privkey);
+    }
+
+    // Generate a new random 32-byte Schnorr private key.
+    let mut privkey_bytes = [0u8; 32];
+    loop {
+        rand::thread_rng().fill_bytes(&mut privkey_bytes);
+        // Validate: secp256k1 rejects a handful of degenerate values (astronomically rare).
+        if secp256k1::SecretKey::from_slice(&privkey_bytes).is_ok() {
+            break;
+        }
+    }
+    let privkey_hex = hex::encode(privkey_bytes);
+
+    // Derive pubkey for the log message.
+    let secp = secp256k1::Secp256k1::new();
+    let sk = secp256k1::SecretKey::from_slice(&privkey_bytes).unwrap();
+    let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
+    let (xonly, _) = kp.x_only_public_key();
+    let pubkey_hex = hex::encode(xonly.serialize());
+
+    fs::write(p, &privkey_hex)
+        .map_err(|e| format!("Failed to write escrow key file '{}': {}", path, e))?;
+
+    info!("OPoI escrow keypair generated → saved to '{}'", path);
+    info!("  Escrow pubkey : {}", pubkey_hex);
+    info!("  Keep '{}' safe — you need it to claim your OPoI escrow rewards.", path);
+    Ok(privkey_hex)
+}
+
 fn load_state(path: &PathBuf) -> EscrowState {
     match fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
