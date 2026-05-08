@@ -10,6 +10,7 @@ use crate::proto::{
 use crate::{miner::MinerManager, Error};
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use base64::Engine as _;
 use log::{error, info, warn};
 use rand::{thread_rng, RngCore};
 use std::collections::VecDeque;
@@ -39,16 +40,21 @@ pub struct KeryxdHandler {
     block_handle: BlockHandle,
 
     /// Queue of AiRequests waiting for inference.
-    /// Each entry: (stable_id_hex16, raw_payload_bytes).
+    /// Each entry: (stable_id_hex16, raw_payload_bytes, prompt, max_tokens).
     /// Fed by both BlockAdded scans and block template scans.
-    ai_request_queue: VecDeque<(String, Vec<u8>)>,
+    ai_request_queue: VecDeque<(String, Vec<u8>, String, usize)>,
 
     /// Stable IDs already queued or in-flight — used for deduplication.
     ai_seen_prefixes: std::collections::HashSet<String>,
 
     /// In-flight SLM inference task: (request_raw_bytes, result_receiver).
-    /// The raw bytes are kept to build the AiResponse tx when inference completes.
+    /// The raw bytes are kept to compute the payload_prefix for the coinbase tag.
     inference_rx: Option<(Vec<u8>, oneshot::Receiver<String>)>,
+
+    /// Completed inference result waiting to be embedded in the next coinbase.
+    /// Format: (payload_prefix_16hex, base64url_result).
+    /// Cleared after a successful block submit.
+    pending_ai_response: Option<(String, String)>,
 
     /// 64-char hex Schnorr pubkey for the OPoI escrow output.
     /// `Some` → 10% of this miner's blue-block rewards go to this key (recoverable).
@@ -138,6 +144,7 @@ impl KeryxdHandler {
             ai_request_queue: VecDeque::new(),
             ai_seen_prefixes: std::collections::HashSet::new(),
             inference_rx: None,
+            pending_ai_response: None,
             escrow_pubkey: resolved_escrow_pubkey,
             escrow_watcher,
         }))
@@ -184,29 +191,68 @@ impl KeryxdHandler {
             .as_deref()
             .map(|pk| format!("/escrow:{}", pk))
             .unwrap_or_default();
-        let extra_data = format!("{}{}/{}/ai:v1:{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag);
+        // Append response tag when a completed inference is waiting to be published.
+        let ai_response_tag = self.pending_ai_response.as_ref()
+            .map(|(prefix, b64)| format!("/ai:r:{}:{}", prefix, b64))
+            .unwrap_or_default();
+        let extra_data = format!("{}{}/{}/ai:v1:{}{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag, ai_response_tag);
         self.client_send(GetBlockTemplateRequestMessage { pay_address, extra_data }).await
     }
 
     /// Scans a slice of transactions for AiRequest payloads and pushes new
-    /// entries into `ai_request_queue` (deduplication by prefix).
+    /// entries into `ai_request_queue` (deduplication by payload hash prefix).
+    ///
+    /// Handles two formats:
+    ///   - Subnetwork 0x03 + binary `AiRequestPayload` (future on-chain format)
+    ///   - Any non-coinbase TX + `KRX:AI:1:` JSON prefix (web wallet format)
     fn scan_txs_for_ai_requests(&mut self, txs: &[crate::proto::RpcTransaction]) {
+        log::debug!(
+            "scan_ai: {} txs, subnetwork_ids: {:?}",
+            txs.len(),
+            txs.iter().map(|t| t.subnetwork_id.as_str()).collect::<Vec<_>>()
+        );
         for tx in txs {
-            if tx.subnetwork_id != keryx_inference::SUBNETWORK_ID_AI_REQUEST_HEX {
-                continue;
-            }
-            if let Ok(raw) = hex::decode(&tx.payload) {
-                if keryx_inference::AiRequestPayload::deserialize(&raw).is_some() {
-                    let hash = blake2b_simd::blake2b(&raw);
-                    let stable_id = hex::encode(&hash.as_bytes()[..8]);
-                    if !self.ai_seen_prefixes.contains(&stable_id) {
-                        info!("OPoI: queued AiRequest id={}", stable_id);
-                        self.ai_seen_prefixes.insert(stable_id.clone());
-                        self.ai_request_queue.push_back((stable_id, raw));
-                    }
+            let extracted: Option<(Vec<u8>, String, usize)> =
+                if tx.subnetwork_id == keryx_inference::SUBNETWORK_ID_AI_REQUEST_HEX {
+                    // Binary AiRequestPayload (dedicated AI subnetwork).
+                    hex::decode(&tx.payload).ok().and_then(|raw| {
+                        keryx_inference::AiRequestPayload::deserialize(&raw).map(|req| {
+                            let prompt = String::from_utf8_lossy(&req.prompt).into_owned();
+                            (raw, prompt, req.max_tokens as usize)
+                        })
+                    })
+                } else if !tx.inputs.is_empty() {
+                    // KRX:AI:1: JSON format used by the web wallet (native subnetwork).
+                    hex::decode(&tx.payload).ok().and_then(|raw| {
+                        Self::parse_krx_ai_payload(&raw)
+                            .map(|(prompt, max_tokens)| (raw, prompt, max_tokens))
+                    })
+                } else {
+                    None // coinbase — skip
+                };
+
+            if let Some((raw, prompt, max_tokens)) = extracted {
+                let hash = blake2b_simd::blake2b(&raw);
+                let stable_id = hex::encode(&hash.as_bytes()[..8]);
+                if !self.ai_seen_prefixes.contains(&stable_id) {
+                    info!("OPoI: queued AiRequest id={}", stable_id);
+                    self.ai_seen_prefixes.insert(stable_id.clone());
+                    self.ai_request_queue.push_back((stable_id, raw, prompt, max_tokens));
                 }
             }
         }
+    }
+
+    /// Parses a `KRX:AI:1:` JSON payload, returning `(prompt, max_tokens)`.
+    fn parse_krx_ai_payload(raw: &[u8]) -> Option<(String, usize)> {
+        const PREFIX: &[u8] = b"KRX:AI:1:";
+        if raw.len() <= PREFIX.len() || !raw.starts_with(PREFIX) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&raw[PREFIX.len()..]).ok()?;
+        let prompt = v["p"].as_str()?.to_string();
+        let max_tokens = v["n"].as_u64().unwrap_or(128) as usize;
+        Some((prompt, max_tokens))
     }
 
     /// Starts SLM inference for the next queued AiRequest, if no inference is
@@ -215,61 +261,39 @@ impl KeryxdHandler {
         if self.inference_rx.is_some() {
             return;
         }
-        if let Some((_stable_id, raw)) = self.ai_request_queue.pop_front() {
-            if let Some(req) = keryx_inference::AiRequestPayload::deserialize(&raw) {
-                let prompt = String::from_utf8_lossy(&req.prompt).into_owned();
-                let max_tokens = req.max_tokens as usize;
-                info!("OPoI: spawning SLM inference (max_tokens={})", max_tokens);
-                let (tx_done, rx_done) = oneshot::channel::<String>();
-                tokio::task::spawn_blocking(move || {
-                    let result = keryx_miner::slm::run_inference(&prompt, max_tokens);
-                    let _ = tx_done.send(result);
-                });
-                self.inference_rx = Some((raw, rx_done));
-            }
+        if let Some((_stable_id, raw, prompt, max_tokens)) = self.ai_request_queue.pop_front() {
+            info!("OPoI: spawning SLM inference (max_tokens={})", max_tokens);
+            let (tx_done, rx_done) = oneshot::channel::<String>();
+            tokio::task::spawn_blocking(move || {
+                let result = keryx_miner::slm::run_inference(&prompt, max_tokens);
+                let _ = tx_done.send(result);
+            });
+            self.inference_rx = Some((raw, rx_done));
         }
     }
 
-    /// Polls the in-flight inference task; when done, submits a proper
-    /// SUBNETWORK_ID_AI_RESPONSE transaction to keryxd (Phase 3).
-    fn poll_inference(&mut self) -> Option<crate::proto::RpcTransaction> {
-        let (ref raw, ref mut rx) = self.inference_rx.as_mut()?;
-        let result = rx.try_recv().ok()?;
-
-        // Build request_hash = blake2b(request_raw)[0..32]
-        let full_hash = blake2b_simd::blake2b(raw);
-        let mut request_hash = [0u8; 32];
-        request_hash.copy_from_slice(&full_hash.as_bytes()[..32]);
-
-        // Phase 3 C: prepend the deterministic MLP commitment to the result.
-        // First 32 bytes of result = model_fixed::forward(request_hash).
-        // This allows consensus to verify fraud via re-execution without ZK proofs.
-        let commitment = keryx_inference::compute_ai_commitment(&request_hash);
-        let mut result_bytes = Vec::with_capacity(32 + result.len());
-        result_bytes.extend_from_slice(&commitment);
-        result_bytes.extend_from_slice(result.as_bytes());
-
-        let response_payload = keryx_inference::AiResponsePayload::new(
-            request_hash,
-            0, // challenge_window_end: computed by node on inclusion
-            result_bytes,
-        );
-
-        let tx = crate::proto::RpcTransaction {
-            version: 0,
-            inputs: vec![],
-            outputs: vec![],
-            lock_time: 0,
-            subnetwork_id: keryx_inference::SUBNETWORK_ID_AI_RESPONSE_HEX.to_string(),
-            gas: 0,
-            payload: hex::encode(response_payload.serialize()),
-            mass: 0,
-            verbose_data: None,
+    /// Polls the in-flight inference task.
+    /// When complete, stores `(payload_prefix, base64_result)` in
+    /// `pending_ai_response` so the next coinbase embeds the `/ai:r:` tag.
+    /// Returns `true` if inference just finished.
+    fn poll_inference(&mut self) -> bool {
+        let Some((ref raw, ref mut rx)) = self.inference_rx.as_mut() else {
+            return false;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return false;
         };
 
+        // payload_prefix = blake2b(raw)[0..8] as 16 hex chars.
+        // Matches ai_requests.payload_prefix stored by the indexer.
+        let full_hash = blake2b_simd::blake2b(raw);
+        let prefix = hex::encode(&full_hash.as_bytes()[..8]);
+        let result_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.as_bytes());
+
         self.inference_rx = None;
-        info!("OPoI: inference complete, submitting AiResponse tx");
-        Some(tx)
+        info!("OPoI: inference complete, prefix={}", prefix);
+        self.pending_ai_response = Some((prefix, result_b64));
+        true
     }
 
     async fn handle_message(&mut self, msg: Payload, miner: &mut MinerManager) -> Result<(), Error> {
@@ -306,9 +330,11 @@ impl KeryxdHandler {
             }
             Payload::NewBlockTemplateNotification(_) => self.client_get_block_template().await?,
             Payload::GetBlockTemplateResponse(template) => {
-                // Poll any in-flight inference; if done, submit the AiResponse tx on-chain.
-                if let Some(tx) = self.poll_inference() {
-                    self.client_send(KaspadMessage::submit_transaction(tx)).await?;
+                // Poll any in-flight inference; if done, request a fresh template
+                // so the /ai:r: response tag is embedded in the next coinbase we mine.
+                if self.poll_inference() {
+                    self.client_get_block_template().await?;
+                    return Ok(());
                 }
                 if let Some(ref block) = template.block {
                     self.scan_txs_for_ai_requests(&block.transactions.clone());
@@ -341,20 +367,19 @@ impl KeryxdHandler {
                 }
             }
             Payload::SubmitBlockResponse(res) => match res.error {
-                None => info!("block submitted successfully!"),
+                None => {
+                    info!("block submitted successfully!");
+                    // Response was embedded in this block — clear pending state.
+                    self.pending_ai_response = None;
+                }
                 Some(e) => warn!("Failed submitting block: {:?}", e),
             },
             Payload::SubmitTransactionResponse(res) => {
-                // Route to escrow watcher if a claim TX is in flight; otherwise it's AiResponse.
-                let is_claim = self.escrow_watcher.as_ref().map_or(false, |w| w.pending_claim_txid.is_some());
-                if is_claim {
+                if self.escrow_watcher.as_ref().map_or(false, |w| w.pending_claim_txid.is_some()) {
                     let err = res.error.map(|e| e.message);
                     self.escrow_watcher.as_mut().unwrap().on_submit_response(err);
-                } else {
-                    match res.error {
-                        None => info!("OPoI: AiResponse tx submitted successfully"),
-                        Some(e) => warn!("OPoI: failed submitting AiResponse tx: {:?}", e),
-                    }
+                } else if let Some(e) = res.error {
+                    warn!("OPoI: submit_transaction error: {:?}", e);
                 }
             }
             Payload::GetInfoResponse(info) => {
