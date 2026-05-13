@@ -232,7 +232,11 @@ impl OpenCLGPUWorker {
 
         let queue =
             CommandQueue::create_with_properties(&context, device.id(), CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, 0)
-                .unwrap_or_else(|_| panic!("{}::CommandQueue::create_with_properties failed", name));
+                .unwrap_or_else(|_| {
+                    warn!("{}: Out-of-order queue unsupported, falling back to in-order", name);
+                    CommandQueue::create_with_properties(&context, device.id(), 0, 0)
+                        .unwrap_or_else(|_| panic!("{}::CommandQueue::create_with_properties failed", name))
+                });
 
         let final_nonce = Buffer::<cl_ulong>::create(context_ref, CL_MEM_READ_WRITE, 1, ptr::null_mut())
             .expect("Buffer allocation failed");
