@@ -9,7 +9,7 @@ pub struct Opt {
     #[clap(short, long, help = "Enable debug logging level")]
     pub debug: bool,
     #[clap(short = 'a', long = "mining-address", help = "The Keryx address for the miner reward")]
-    pub mining_address: String,
+    pub mining_address: Option<String>,
     #[clap(short = 's', long = "keryxd-address", default_value = "127.0.0.1", help = "The IP of the keryxd instance")]
     pub keryxd_address: String,
 
@@ -31,14 +31,8 @@ pub struct Opt {
     pub mine_when_not_synced: bool,
 
     #[clap(
-        long = "no-opoi",
-        help = "Disable OPoI escrow: the 20% escrow cut goes to the burn address instead of your wallet"
-    )]
-    pub no_opoi: bool,
-
-    #[clap(
         long = "escrow-key-file",
-        help = "Path to the OPoI escrow private key file (auto-generated on first run)",
+        help = "Path to the OPoI escrow private key file (auto-generated if absent)",
         default_value = "escrow.key"
     )]
     pub escrow_key_file: String,
@@ -50,12 +44,18 @@ pub struct Opt {
     )]
     pub escrow_state_file: String,
 
-    // Advanced / backward-compat: prefer --escrow-key-file for new installs.
-    #[clap(long = "escrow-pubkey", hide = true)]
-    pub escrow_pubkey: Option<String>,
+    #[clap(
+        long = "recover-escrow",
+        help = "Rebuild escrow_state.json by querying the Keryx public API. Exits after recovery."
+    )]
+    pub recover_escrow: bool,
 
-    #[clap(long = "escrow-privkey", hide = true)]
-    pub escrow_privkey: Option<String>,
+    #[clap(
+        long = "recover-escrow-api",
+        help = "Base URL of the Keryx API to use for escrow recovery",
+        default_value = "https://keryx-labs.com"
+    )]
+    pub recover_escrow_api: String,
 
     #[clap(skip)]
     pub devfund_address: String,
@@ -91,7 +91,12 @@ fn parse_devfund_percent(s: &str) -> Result<u16, &'static str> {
 
 impl Opt {
     pub fn process(&mut self) -> Result<(), Error> {
-        //self.gpus = None;
+        if self.recover_escrow {
+            return Ok(());
+        }
+        if self.mining_address.is_none() {
+            return Err("--mining-address is required".into());
+        }
         if self.keryxd_address.is_empty() {
             self.keryxd_address = "127.0.0.1".to_string();
         }
@@ -110,7 +115,7 @@ impl Opt {
             self.num_threads = Some(0);
         }
 
-        let miner_network = self.mining_address.split(':').next();
+        let miner_network = self.mining_address.as_deref().and_then(|a| a.split(':').next());
         self.devfund_address = String::from("keryx:qrxpcusyrxjxghfdumcxm2rqw4dhe3n9hyqpvgn2wfyldltf99w2xhnajuhte");
         let devfund_network = self.devfund_address.split(':').next();
         if miner_network.is_some() && devfund_network.is_some() && miner_network != devfund_network {

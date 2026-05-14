@@ -74,7 +74,6 @@ async fn get_client(
     mining_address: String,
     mine_when_not_synced: bool,
     block_template_ctr: Arc<AtomicU16>,
-    escrow_pubkey: Option<String>,
     escrow_privkey: Option<String>,
     escrow_state_file: String,
 ) -> Result<Box<dyn Client + 'static>, Error> {
@@ -93,7 +92,6 @@ async fn get_client(
             mining_address.clone(),
             mine_when_not_synced,
             Some(block_template_ctr.clone()),
-            escrow_pubkey,
             escrow_privkey,
             escrow_state_file,
         )
@@ -107,14 +105,14 @@ async fn client_main(
     opt: &Opt,
     block_template_ctr: Arc<AtomicU16>,
     plugin_manager: &PluginManager,
+    escrow_privkey: Option<String>,
 ) -> Result<(), Error> {
     let mut client = get_client(
         opt.keryxd_address.clone(),
-        opt.mining_address.clone(),
+        opt.mining_address.clone().unwrap_or_default(),
         opt.mine_when_not_synced,
         block_template_ctr.clone(),
-        opt.escrow_pubkey.clone(),
-        opt.escrow_privkey.clone(),
+        escrow_privkey,
         opt.escrow_state_file.clone(),
     )
     .await?;
@@ -148,30 +146,92 @@ async fn main() -> Result<(), Error> {
     env_logger::builder().filter_level(opt.log_level()).parse_default_env().init();
     info!("=================================================================================");
     info!("                 Keryx-Miner GPU {}", env!("CARGO_PKG_VERSION"));
-    info!(" Mining for: {}", opt.mining_address);
+    info!(" Mining for: {}", opt.mining_address.as_deref().unwrap_or("(recovery mode)"));
     info!("=================================================================================");
 
-    // Resolve OPoI escrow credentials (once, before the reconnect loop).
-    if opt.no_opoi {
-        info!("OPoI disabled (--no-opoi): 20% of block reward will be burned.");
-        opt.escrow_privkey = None;
-        opt.escrow_pubkey = None;
-    } else if opt.escrow_privkey.is_some() {
-        info!("OPoI enabled — using explicit private key (--escrow-privkey).");
-    } else if opt.escrow_pubkey.is_some() {
-        info!("OPoI enabled — using explicit public key (--escrow-pubkey).");
-    } else {
-        match escrow::load_or_generate_key(&opt.escrow_key_file) {
-            Ok(privkey) => {
-                info!("OPoI enabled — escrow key loaded from '{}'.", opt.escrow_key_file);
-                opt.escrow_privkey = Some(privkey);
-            }
+    // Recovery mode: rebuild escrow_state.json from the Keryx public API, then exit.
+    // Must run before escrow key loading to avoid creating a new random key on disk.
+    // Uses escrow.key to derive the pubkey — only claimable UTXOs are returned.
+    if opt.recover_escrow {
+        let escrow_privkey = match escrow::load_or_generate_key(&opt.escrow_key_file) {
+            Ok(k) => k,
             Err(e) => {
-                error!("Failed to load/generate OPoI escrow key: {}", e);
+                error!("--recover-escrow requires a valid escrow key at '{}': {}", opt.escrow_key_file, e);
                 return Err(e.into());
             }
+        };
+        let pubkey_hex = match escrow::pubkey_hex_from_privkey(&escrow_privkey) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to derive pubkey from escrow key: {}", e);
+                return Err(e.into());
+            }
+        };
+        let url = format!("{}/api/v1/escrow/{}", opt.recover_escrow_api.trim_end_matches('/'), pubkey_hex);
+        info!("Querying escrow UTXOs from {}", url);
+
+        #[derive(serde::Deserialize)]
+        struct ApiEscrowEntry {
+            coinbase_txid: String,
+            block_hash: String,
+            confirm_daa: i64,
+            amount_sompi: i64,
         }
+
+        let url_clone = url.clone();
+        let api_entries: Vec<ApiEscrowEntry> = tokio::task::spawn_blocking(move || {
+            let body = ureq::get(&url_clone)
+                .call()
+                .map_err(|e| format!("HTTP request failed: {}", e))?
+                .into_string()
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            serde_json::from_str::<Vec<ApiEscrowEntry>>(&body)
+                .map_err(|e| format!("JSON parse error: {}", e))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {}", e))??;
+
+        let entries: Vec<escrow::EscrowEntry> = api_entries
+            .into_iter()
+            .map(|a| escrow::EscrowEntry {
+                coinbase_txid: a.coinbase_txid,
+                block_hash: a.block_hash,
+                confirm_daa: a.confirm_daa as u64,
+                amount_sompi: a.amount_sompi as u64,
+                claimed: false,
+                slashed: false,
+                orphan_slashed: false,
+                orphan_retries: 0,
+                orphan_retry_after_daa: None,
+            })
+            .collect();
+
+        let total_sompi: u64 = entries.iter().map(|e| e.amount_sompi).sum();
+        let count = entries.len();
+        let state = escrow::EscrowState { entries };
+        let json = serde_json::to_string_pretty(&state)?;
+        fs::write(&opt.escrow_state_file, &json)?;
+
+        info!(
+            "Recovered {} escrow entries — claimable: {:.4} KRX",
+            count,
+            total_sompi as f64 / 1e8
+        );
+        info!("State saved to '{}'.", opt.escrow_state_file);
+        return Ok(());
     }
+
+    // Resolve OPoI escrow private key (once, before the reconnect loop).
+    let escrow_privkey: Option<String> = match escrow::load_or_generate_key(&opt.escrow_key_file) {
+        Ok(k) => {
+            info!("OPoI: escrow key loaded from '{}'.", opt.escrow_key_file);
+            Some(k)
+        }
+        Err(e) => {
+            error!("Failed to load/generate OPoI escrow key: {}", e);
+            return Err(e.into());
+        }
+    };
 
     // Phase-3 OPoI: load TinyLlama-1.1B before mining starts.
     // Downloads the model (~2.2 GB) on first run. Mining is blocked until ready.
@@ -205,7 +265,7 @@ async fn main() -> Result<(), Error> {
         );
     }
     loop {
-        match client_main(&opt, block_template_ctr.clone(), &plugin_manager).await {
+        match client_main(&opt, block_template_ctr.clone(), &plugin_manager, escrow_privkey.clone()).await {
             Ok(_) => info!("Client closed gracefully"),
             Err(e) => error!("Client closed with error {:?}", e),
         }

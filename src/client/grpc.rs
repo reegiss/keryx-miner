@@ -56,12 +56,11 @@ pub struct KeryxdHandler {
     /// Cleared after a successful block submit.
     pending_ai_response: Option<(String, String)>,
 
-    /// 64-char hex Schnorr pubkey for the OPoI escrow output.
-    /// `Some` → 10% of this miner's blue-block rewards go to this key (recoverable).
-    /// `None` → 10% is burned (standard miner).
+    /// 64-char hex Schnorr pubkey embedded in coinbase extra_data as `/escrow:<pubkey>`.
+    /// The node routes 20% of the block reward to the corresponding CSV-locked escrow output.
     escrow_pubkey: Option<String>,
 
-    /// Auto-claim module: present when `--escrow-privkey` is supplied.
+    /// Auto-claim module: present when an escrow private key is available.
     escrow_watcher: Option<crate::escrow::EscrowWatcher>,
 }
 
@@ -98,7 +97,6 @@ impl KeryxdHandler {
         miner_address: String,
         mine_when_not_synced: bool,
         block_template_ctr: Option<Arc<AtomicU16>>,
-        escrow_pubkey: Option<String>,
         escrow_privkey: Option<String>,
         escrow_state_file: String,
     ) -> Result<Box<Self>, Error>
@@ -106,22 +104,23 @@ impl KeryxdHandler {
         D: std::convert::TryInto<tonic::transport::Endpoint>,
         D::Error: Into<Error>,
     {
-        // If a privkey is provided, build the escrow watcher and derive the pubkey from it.
-        let (resolved_escrow_pubkey, escrow_watcher) = match escrow_privkey {
+        // Build EscrowWatcher from the resolved escrow privkey (derived or loaded from file).
+        // The watcher also provides the pubkey to embed in coinbase extra_data.
+        let (escrow_pubkey, escrow_watcher) = match escrow_privkey {
             Some(ref privkey) => {
                 match crate::escrow::EscrowWatcher::new(privkey, &miner_address, escrow_state_file.into()) {
                     Ok(watcher) => {
-                        let pk_hex = watcher.pubkey_hex();
-                        info!("Escrow auto-claim enabled: pubkey={}", pk_hex);
-                        (Some(pk_hex), Some(watcher))
+                        let pk = watcher.pubkey_hex();
+                        info!("OPoI escrow active: pubkey={}", pk);
+                        (Some(pk), Some(watcher))
                     }
                     Err(e) => {
-                        log::error!("Failed to initialise EscrowWatcher: {} — auto-claim disabled", e);
-                        (escrow_pubkey, None)
+                        log::error!("Failed to initialise EscrowWatcher: {} — escrow disabled", e);
+                        (None, None)
                     }
                 }
             }
-            None => (escrow_pubkey, None),
+            None => (None, None),
         };
 
         let mut client = RpcClient::connect(address).await?;
@@ -145,7 +144,7 @@ impl KeryxdHandler {
             ai_seen_prefixes: std::collections::HashSet::new(),
             inference_rx: None,
             pending_ai_response: None,
-            escrow_pubkey: resolved_escrow_pubkey,
+            escrow_pubkey,
             escrow_watcher,
         }))
     }
@@ -185,8 +184,7 @@ impl KeryxdHandler {
         let nonce_hex = format!("{:016x}", thread_rng().next_u64());
         // OPoI Phase 2: run the deterministic fixed-point MLP (matches node validation).
         let opoi_tag = keryx_miner::inference::compute_opoi_tag(&nonce_hex);
-        // OPoI escrow: if a Schnorr pubkey is configured, embed it so the node can route
-        // the 20% escrow cut to a recoverable output instead of burning it.
+        // Embed escrow pubkey so the node routes 20% to the CSV-locked escrow output.
         let escrow_part = self.escrow_pubkey
             .as_deref()
             .map(|pk| format!("/escrow:{}", pk))

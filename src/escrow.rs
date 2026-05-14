@@ -74,9 +74,9 @@ pub struct EscrowWatcher {
 impl EscrowWatcher {
     pub fn new(privkey_hex: &str, mining_address: &str, state_path: PathBuf) -> Result<Self, String> {
         let privkey_bytes = hex::decode(privkey_hex)
-            .map_err(|e| format!("Invalid --escrow-privkey hex: {}", e))?;
+            .map_err(|e| format!("Invalid --mining-privkey hex: {}", e))?;
         if privkey_bytes.len() != 32 {
-            return Err(format!("--escrow-privkey must be 32 bytes (64 hex chars), got {}", privkey_bytes.len()));
+            return Err(format!("--mining-privkey must be 32 bytes (64 hex chars), got {}", privkey_bytes.len()));
         }
 
         let secp = secp256k1::Secp256k1::new();
@@ -113,7 +113,7 @@ impl EscrowWatcher {
         })
     }
 
-    /// Return the 64-char hex x-only public key, used as `--escrow-pubkey` in the block template.
+    /// Return the 64-char hex x-only public key of the mining key.
     pub fn pubkey_hex(&self) -> String {
         hex::encode(self.pubkey_bytes)
     }
@@ -356,8 +356,7 @@ impl EscrowWatcher {
     }
 }
 
-/// Load the OPoI escrow private key from `path`.
-/// If the file does not exist, generates a new random keypair, saves it, and logs the pubkey.
+/// Load the OPoI escrow private key from `path`, generating a new one if absent.
 /// The file contains exactly 64 lowercase hex characters (32-byte Schnorr private key).
 pub fn load_or_generate_key(path: &str) -> Result<String, String> {
     use rand::RngCore;
@@ -375,18 +374,15 @@ pub fn load_or_generate_key(path: &str) -> Result<String, String> {
         return Ok(privkey);
     }
 
-    // Generate a new random 32-byte Schnorr private key.
     let mut privkey_bytes = [0u8; 32];
     loop {
         rand::thread_rng().fill_bytes(&mut privkey_bytes);
-        // Validate: secp256k1 rejects a handful of degenerate values (astronomically rare).
         if secp256k1::SecretKey::from_slice(&privkey_bytes).is_ok() {
             break;
         }
     }
     let privkey_hex = hex::encode(privkey_bytes);
 
-    // Derive pubkey for the log message.
     let secp = secp256k1::Secp256k1::new();
     let sk = secp256k1::SecretKey::from_slice(&privkey_bytes).unwrap();
     let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
@@ -396,14 +392,26 @@ pub fn load_or_generate_key(path: &str) -> Result<String, String> {
     fs::write(p, &privkey_hex)
         .map_err(|e| format!("Failed to write escrow key file '{}': {}", path, e))?;
 
-    info!("OPoI escrow keypair generated → saved to '{}'", path);
+    info!("OPoI escrow keypair generated — saved to '{}'", path);
     info!("  Escrow pubkey : {}", pubkey_hex);
-    info!("  Keep '{}' safe — you need it to claim your OPoI escrow rewards.", path);
+    info!("  Keep '{}' safe — needed to claim your OPoI escrow rewards.", path);
     Ok(privkey_hex)
 }
 
+/// Derive the x-only public key hex (64 hex chars) from a hex-encoded private key.
+pub fn pubkey_hex_from_privkey(privkey_hex: &str) -> Result<String, String> {
+    let privkey_bytes = hex::decode(privkey_hex)
+        .map_err(|e| format!("Invalid privkey hex: {}", e))?;
+    let secp = secp256k1::Secp256k1::new();
+    let sk = secp256k1::SecretKey::from_slice(&privkey_bytes)
+        .map_err(|e| format!("Invalid private key: {}", e))?;
+    let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
+    let (xonly, _) = kp.x_only_public_key();
+    Ok(hex::encode(xonly.serialize()))
+}
+
 fn load_state(path: &PathBuf) -> EscrowState {
-    let mut state = match fs::read_to_string(path) {
+    let state = match fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
             warn!("EscrowWatcher: could not parse {}: {} — starting fresh", path.display(), e);
             EscrowState::default()
@@ -414,18 +422,6 @@ fn load_state(path: &PathBuf) -> EscrowState {
             EscrowState::default()
         }
     };
-
-    // Migration: before `orphan_slashed` was introduced, all claim rejections (including
-    // orphan/reorg) were permanently marked `slashed = true`. Convert those to retriable
-    // `orphan_slashed` so they get re-attempted once their block returns to the selected chain.
-    let migrated = state.entries.iter_mut().filter(|e| e.slashed && !e.claimed && !e.orphan_slashed).count();
-    if migrated > 0 {
-        for e in state.entries.iter_mut().filter(|e| e.slashed && !e.claimed) {
-            e.orphan_slashed = true;
-            e.slashed = false;
-        }
-        debug!("EscrowWatcher: migrated {} orphan-slashed entries (retriable retry)", migrated);
-    }
 
     state
 }
