@@ -189,11 +189,21 @@ impl KeryxdHandler {
             .as_deref()
             .map(|pk| format!("/escrow:{}", pk))
             .unwrap_or_default();
+        // Announce loaded model capabilities so the node can enforce model_id matching.
+        let cap_part = {
+            let ids = keryx_miner::slm::loaded_model_ids();
+            if ids.is_empty() {
+                String::new()
+            } else {
+                let hex_ids: Vec<String> = ids.iter().map(|id| hex::encode(id)).collect();
+                format!("/ai:cap:{}", hex_ids.join(","))
+            }
+        };
         // Append response tag when a completed inference is waiting to be published.
         let ai_response_tag = self.pending_ai_response.as_ref()
             .map(|(prefix, b64)| format!("/ai:r:{}:{}", prefix, b64))
             .unwrap_or_default();
-        let extra_data = format!("{}{}/{}/ai:v1:{}{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag, ai_response_tag);
+        let extra_data = format!("{}{}/{}/ai:v1:{}{}{}", EXTRA_DATA, escrow_part, nonce_hex, opoi_tag, cap_part, ai_response_tag);
         self.client_send(GetBlockTemplateRequestMessage { pay_address, extra_data }).await
     }
 
