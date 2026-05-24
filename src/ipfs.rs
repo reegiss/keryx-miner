@@ -1,7 +1,7 @@
 /// IPFS integration — upload inference results and auto-manage kubo daemon.
 use std::time::Duration;
 
-const KUBO_VERSION: &str = "0.33.0";
+const KUBO_VERSION_FALLBACK: &str = "0.41.0";
 
 /// Upload `text` to the IPFS node at `api_url` and return the raw 34-byte multihash.
 /// The multihash format is: [0x12, 0x20, <32-byte sha2-256 digest>].
@@ -149,12 +149,13 @@ fn find_or_download_kubo() -> anyhow::Result<std::path::PathBuf> {
     }
 
     // 3. Download kubo for the current platform.
+    let version = fetch_latest_kubo_version();
     let (os, arch) = detect_platform()?;
-    let archive_name = format!("kubo_v{}_{}-{}.tar.gz", KUBO_VERSION, os, arch);
-    let url = format!("https://dist.ipfs.tech/kubo/v{}/{}", KUBO_VERSION, archive_name);
+    let archive_name = format!("kubo_v{}_{}-{}.tar.gz", version, os, arch);
+    let url = format!("https://dist.ipfs.tech/kubo/v{}/{}", version, archive_name);
     let archive_path = exe_dir.join(&archive_name);
 
-    log::info!("Downloading kubo {}...", KUBO_VERSION);
+    log::info!("Downloading kubo {}...", version);
     download_file(&url, &archive_path)?;
 
     extract_ipfs_binary(&archive_path, &exe_dir)?;
@@ -171,6 +172,28 @@ fn find_or_download_kubo() -> anyhow::Result<std::path::PathBuf> {
 
     log::info!("kubo installed at {}", bin.display());
     Ok(bin)
+}
+
+fn fetch_latest_kubo_version() -> String {
+    let result = ureq::get("https://api.github.com/repos/ipfs/kubo/releases/latest")
+        .set("User-Agent", "keryx-miner")
+        .timeout(Duration::from_secs(10))
+        .call();
+    match result {
+        Ok(resp) => {
+            if let Ok(body) = resp.into_string() {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(tag) = json["tag_name"].as_str() {
+                        let version = tag.trim_start_matches('v').to_string();
+                        log::info!("Latest kubo version: {}", version);
+                        return version;
+                    }
+                }
+            }
+        }
+        Err(e) => log::warn!("Could not fetch latest kubo version: {} — using fallback {}", e, KUBO_VERSION_FALLBACK),
+    }
+    KUBO_VERSION_FALLBACK.to_string()
 }
 
 fn detect_platform() -> anyhow::Result<(&'static str, &'static str)> {
