@@ -224,16 +224,20 @@ impl EscrowWatcher {
         // virtual-state DAA score by several blocks in the BlockDAG.  A single +1 margin is
         // often not enough, causing seq-lock rejections that get retried every block.
         // Per-entry orphan/seq-lock cooldowns are checked individually so they don't block other claims.
+        // Inference entries are prioritised: they carry user fees and must not be starved by the
+        // large coinbase entry queue.
+        let is_eligible = |e: &&EscrowEntry| {
+            !e.claimed
+                && !e.slashed
+                && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
+                && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
+        };
         let entry = self
             .state
             .entries
             .iter()
-            .find(|e| {
-                !e.claimed
-                    && !e.slashed
-                    && daa_score >= e.confirm_daa + CHALLENGE_WINDOW_BLOCKS + 10
-                    && e.orphan_retry_after_daa.map_or(true, |retry_daa| daa_score >= retry_daa)
-            })?
+            .find(|e| e.is_inference && is_eligible(e))
+            .or_else(|| self.state.entries.iter().find(|e| !e.is_inference && is_eligible(e)))?
             .clone();
 
         match self.build_claim_tx(&entry) {
