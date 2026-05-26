@@ -327,7 +327,10 @@ async fn main() -> Result<(), Error> {
         &[&keryx_miner::models::TINYLLAMA, &keryx_miner::models::DEEPSEEK_R1_8B]
     };
     keryx_miner::slm::init_supported(specs);
-    info!("OPoI Phase-3 active — {} model(s) supported, loaded on demand when a request arrives.", specs.len());
+    info!("OPoI Phase-3 active — {} model(s) supported.", specs.len());
+    info!("Prefetching model files before mining starts…");
+    tokio::task::spawn_blocking(move || keryx_miner::slm::prefetch_models(specs)).await.ok();
+    info!("Model files ready — starting mining.");
     info!("Found plugins: {:?}", plugins);
     info!("Plugins found {} workers", worker_count);
     if worker_count == 0 && opt.num_threads.unwrap_or(0) == 0 {

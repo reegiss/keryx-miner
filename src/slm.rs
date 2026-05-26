@@ -471,6 +471,24 @@ pub fn init_supported(specs: &'static [&'static ModelSpec]) {
     let _ = SUPPORTED_SPECS.set(specs);
 }
 
+/// Pre-download all registered model files before mining starts.
+///
+/// Does not load weights into GPU memory — just ensures files are on disk so
+/// the first inference request doesn't stall the mining workers mid-session.
+pub fn prefetch_models(specs: &'static [&'static ModelSpec]) {
+    for spec in specs {
+        log::info!("SlmEngine: prefetching model '{}'…", spec.name);
+        let result = match spec.format {
+            ModelFormat::Safetensors => ensure_safetensors(spec).map(|_| ()),
+            ModelFormat::Gguf | ModelFormat::GgufQwen2 => ensure_gguf(spec).map(|_| ()),
+        };
+        match result {
+            Ok(()) => log::info!("SlmEngine: '{}' files ready.", spec.name),
+            Err(e) => log::warn!("SlmEngine: prefetch '{}' failed: {} — will retry on first request.", spec.name, e),
+        }
+    }
+}
+
 /// Return the model_ids of all supported models (used for coinbase capability announcement).
 pub fn loaded_model_ids() -> Vec<[u8; 32]> {
     SUPPORTED_SPECS.get()
