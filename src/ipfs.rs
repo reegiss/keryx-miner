@@ -109,10 +109,27 @@ pub fn ensure_daemon(api_url: &str) {
         let _ = std::process::Command::new(&ipfs_bin).arg("init").status();
     }
 
-    // Start daemon in background.
+    // Start daemon in background, redirecting output to a log file so
+    // mDNS/discovery noise does not pollute the miner terminal while
+    // keeping Kubo logs accessible for inference debugging.
     log::info!("Starting IPFS daemon...");
+    let log_dir = std::path::PathBuf::from(&home).join(".keryx");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let kubo_log = log_dir.join("kubo.log");
+    let (stdout, stderr) = match std::fs::OpenOptions::new().create(true).append(true).open(&kubo_log) {
+        Ok(f) => match f.try_clone() {
+            Ok(f2) => {
+                log::info!("Kubo output redirected to {}", kubo_log.display());
+                (std::process::Stdio::from(f), std::process::Stdio::from(f2))
+            }
+            Err(_) => (std::process::Stdio::null(), std::process::Stdio::null()),
+        },
+        Err(_) => (std::process::Stdio::null(), std::process::Stdio::null()),
+    };
     match std::process::Command::new(&ipfs_bin)
         .args(["daemon", "--routing=dhtclient"])
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
     {
         Ok(_) => {
