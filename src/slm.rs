@@ -486,6 +486,62 @@ pub fn init_supported(specs: &'static [&'static ModelSpec]) {
     let _ = SUPPORTED_SPECS.set(specs);
 }
 
+/// Outcome of the startup GPU inference probe.
+pub enum GpuProbe {
+    /// A GPU matmul succeeded — cuBLAS is loaded and full-speed inference is available.
+    Ok,
+    /// No CUDA device present — inference will fall back to CPU (acceptable for small models only).
+    NoCuda,
+    /// A CUDA device exists but cuBLAS could not be loaded — GPU inference is impossible.
+    CublasMissing,
+}
+
+/// Verify that GPU inference actually works *before* mining starts.
+///
+/// `Device::new_cuda` succeeds with only the NVIDIA driver installed, but cudarc loads
+/// cuBLAS lazily on the first GPU matmul and **panics** (it does not return an `Err`) when
+/// `libcublas` cannot be `dlopen`'d. Discovering that mid-challenge poisons the engine and
+/// spams the logs. So we force the failure here, once, with a tiny 2×2 matmul wrapped in
+/// `catch_unwind`, and report a clean, actionable result.
+pub fn probe_gpu_inference() -> GpuProbe {
+    // candle's `Device::new_cuda` eagerly creates a cuBLAS handle, and cudarc *panics*
+    // (it does not return an Err) when libcublas cannot be loaded. A genuinely absent
+    // CUDA device, by contrast, returns Err cleanly. So the whole sequence — including
+    // new_cuda — must live inside catch_unwind, and we distinguish the three outcomes:
+    //   Ok(Ok)  -> CUDA + cuBLAS work
+    //   Ok(Err) -> no usable CUDA device (clean error) -> CPU fallback
+    //   Err     -> panic -> cuBLAS missing
+    //
+    // Silence the default panic hook for the probe so its scary backtrace doesn't pollute
+    // the logs; we report a clean, actionable message ourselves from the caller.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let probe = std::panic::catch_unwind(|| {
+        let device = Device::new_cuda(0)?;
+        let a = Tensor::new(&[[1f32, 2.0], [3.0, 4.0]], &device)?;
+        let b = Tensor::new(&[[5f32, 6.0], [7.0, 8.0]], &device)?;
+        a.matmul(&b)?.to_vec2::<f32>()?;
+        anyhow::Ok(())
+    });
+    std::panic::set_hook(prev_hook);
+    match probe {
+        Ok(Ok(())) => GpuProbe::Ok,
+        Ok(Err(_)) => GpuProbe::NoCuda,
+        Err(payload) => {
+            // Surface the real panic message (e.g. which CUDA library failed to load) instead
+            // of hiding it — candle creates cuBLAS, cuBLASLt and cuRAND handles at device init,
+            // and any one of them missing panics here.
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            log::error!("GPU inference probe panicked: {}", msg);
+            GpuProbe::CublasMissing
+        }
+    }
+}
+
 /// Pre-download all registered model files before mining starts.
 ///
 /// Does not load weights into GPU memory — just ensures files are on disk so
@@ -532,38 +588,59 @@ pub fn load_and_run_inference(model_id: &[u8; 32], prompt: &str, max_tokens: usi
     let specs = SUPPORTED_SPECS.get()?;
     let spec = specs.iter().find(|s| &s.model_id == model_id)?;
 
-    let mut guard = ENGINE.lock().expect("ENGINE mutex poisoned");
-
-    let needs_load = guard.as_ref().map_or(true, |e| &e.model_id != model_id);
-    if needs_load {
-        if let Some(ref old) = *guard {
-            log::info!("SlmEngine: evicting '{}' to load '{}'", old.name, spec.name);
-        }
-        *guard = None;
-        let device = match Device::new_cuda(0) {
-            Ok(d) => { log::info!("SlmEngine: CUDA device 0 active"); d }
-            Err(e) => { log::error!("SlmEngine: CUDA unavailable ({}) — CPU fallback", e); Device::Cpu }
+    // catch_unwind prevents any internal panic (cudarc, candle, OOM…) from permanently
+    // poisoning ENGINE. Without this, one panic bricks inference for the entire session.
+    let result = std::panic::catch_unwind(|| {
+        let mut guard = match ENGINE.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                log::warn!("SlmEngine: ENGINE mutex was poisoned — recovering and evicting cached model");
+                let mut g = poisoned.into_inner();
+                *g = None;
+                g
+            }
         };
-        match load_engine(spec, device) {
-            Ok(e) => { *guard = Some(e); }
-            Err(e) => {
-                log::error!("SlmEngine: failed to load '{}': {}", spec.name, e);
-                return None;
+
+        let needs_load = guard.as_ref().map_or(true, |e| &e.model_id != model_id);
+        if needs_load {
+            if let Some(ref old) = *guard {
+                log::info!("SlmEngine: evicting '{}' to load '{}'", old.name, spec.name);
+            }
+            *guard = None;
+            let device = match Device::new_cuda(0) {
+                Ok(d) => { log::info!("SlmEngine: CUDA device 0 active"); d }
+                Err(e) => { log::warn!("SlmEngine: CUDA unavailable ({e}) — CPU fallback"); Device::Cpu }
+            };
+            match load_engine(spec, device) {
+                Ok(e) => { *guard = Some(e); }
+                Err(e) => {
+                    log::error!("SlmEngine: failed to load '{}': {}", spec.name, e);
+                    return None;
+                }
             }
         }
-    }
 
-    let engine = guard.as_mut()?;
-    match generate(engine, prompt, max_tokens) {
-        Ok(text) if !text.is_empty() => Some(text),
-        Ok(_) => {
-            // Empty = R1 think block was cut by max_tokens — skip IPFS upload.
-            log::warn!("SlmEngine '{}': think block cut by max_tokens, skipping response", engine.name);
-            None
+        let engine = guard.as_mut()?;
+        match generate(engine, prompt, max_tokens) {
+            Ok(text) if !text.is_empty() => Some(text),
+            Ok(_) => {
+                log::warn!("SlmEngine '{}': think block cut by max_tokens, skipping response", engine.name);
+                None
+            }
+            Err(e) => {
+                log::warn!("SlmEngine '{}' generate error: {}", engine.name, e);
+                Some(format!("[inference error: {}]", e))
+            }
         }
-        Err(e) => {
-            log::warn!("SlmEngine '{}' generate error: {}", engine.name, e);
-            Some(format!("[inference error: {}]", e))
+    });
+
+    match result {
+        Ok(output) => output,
+        Err(_) => {
+            log::error!("SlmEngine: inference panicked — engine evicted, will retry on next challenge");
+            log::error!("SlmEngine: cuBLAS missing? Run: sudo apt-get install -y libcublas-12-2 then restart the miner");
+            if let Ok(mut g) = ENGINE.lock() { *g = None; }
+            None
         }
     }
 }

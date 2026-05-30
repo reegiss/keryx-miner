@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 
 use clap::{App, FromArgMatches, IntoApp};
 use keryx_miner::PluginManager;
-use log::{error, info};
+use log::{error, info, warn};
 use rand::{thread_rng, RngCore};
 use std::fs;
 use std::sync::atomic::AtomicU16;
@@ -43,6 +43,54 @@ pub mod proto {
 pub type Error = Box<dyn StdError + Send + Sync + 'static>;
 
 type Hash = Uint256;
+
+/// Attempt to install the CUDA runtime libraries candle needs, on a Debian/Ubuntu host (HiveOS).
+///
+/// OPoI GPU inference needs cuBLAS, cuBLASLt and cuRAND — candle creates handles for all three
+/// when it opens the CUDA device. These ship with the CUDA toolkit but not with the bare NVIDIA
+/// driver that mining rigs usually have. Rather than forcing miners to run apt by hand, we add
+/// the NVIDIA CUDA repo and install `libcublas-12-2` (cuBLAS + cuBLASLt) and `libcurand-12-2`
+/// ourselves, then register their directory with ldconfig. Runs as root on HiveOS, so no sudo.
+///
+/// Version 12-2 (not 12-6) is deliberate: the binary's candle kernels are compiled with the
+/// CUDA 12.2 toolkit so they JIT on driver >= 535 (typical HiveOS), and the cuBLAS runtime must
+/// match that minimum. Installing 12-6 here would pull a runtime needing driver >= 560.
+/// Returns true on success.
+#[cfg(target_os = "linux")]
+fn install_cuda_libs() -> bool {
+    use std::process::Command;
+    // Only meaningful where apt-get exists (Debian/Ubuntu, incl. HiveOS).
+    let has_apt = Command::new("sh")
+        .args(["-c", "command -v apt-get"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !has_apt {
+        error!("CUDA lib auto-install needs apt-get (Debian/Ubuntu) — not found on this system.");
+        return false;
+    }
+    // The CUDA libs install into /usr/local/cuda-*/targets/x86_64-linux/lib, which is NOT in
+    // the default loader search path. Installing alone is not enough: we must register that
+    // directory with ldconfig so dlopen("libcublas.so.12" / "libcurand.so.10") resolves it.
+    let script = r#"set -e
+cd /tmp
+wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O cuda-keyring.deb
+dpkg -i cuda-keyring.deb
+apt-get update -qq
+apt-get install -y -qq libcublas-12-2 libcurand-12-2
+CUBLAS_PATH=$(find /usr/local /usr/lib -name 'libcublas.so.12' 2>/dev/null | head -1)
+if [ -z "$CUBLAS_PATH" ]; then echo "libcublas.so.12 not found after install"; exit 1; fi
+echo "$(dirname "$CUBLAS_PATH")" > /etc/ld.so.conf.d/keryx-cuda.conf
+ldconfig
+ldconfig -p | grep -q libcublas.so.12 || { echo "libcublas still not in loader cache"; exit 1; }
+ldconfig -p | grep -q libcurand.so   || { echo "libcurand still not in loader cache"; exit 1; }
+rm -f cuda-keyring.deb"#;
+    Command::new("bash")
+        .args(["-c", script])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 #[cfg(target_os = "windows")]
 fn adjust_console() -> Result<(), Error> {
@@ -337,6 +385,48 @@ async fn main() -> Result<(), Error> {
         }
         Err(e) => {
             error!("Model prefetch task panicked: {}", e);
+            return Err(e.into());
+        }
+    }
+    // Verify GPU inference works before mining. OPoI challenges are mandatory, so a miner
+    // that cannot run inference must fail fast with a clear message rather than spam panics.
+    info!("Probing GPU inference (cuBLAS) before mining…");
+    match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
+        Ok(keryx_miner::slm::GpuProbe::Ok) => info!("GPU inference verified — cuBLAS loaded successfully."),
+        Ok(keryx_miner::slm::GpuProbe::NoCuda) => {
+            warn!("No CUDA device detected — inference will run on CPU (small models only, slow).");
+        }
+        Ok(keryx_miner::slm::GpuProbe::CublasMissing) => {
+            warn!("CUDA GPU detected but a CUDA runtime lib is missing — installing them automatically (one-time)…");
+            #[cfg(target_os = "linux")]
+            {
+                let installed = tokio::task::spawn_blocking(install_cuda_libs).await.unwrap_or(false);
+                if !installed {
+                    error!("Automatic CUDA lib install failed — install them manually then restart:");
+                    error!("  apt-get install -y libcublas-12-2 libcurand-12-2");
+                    return Err("CUDA runtime libs missing — cannot start OPoI mining".into());
+                }
+                // Re-probe in-process. The dynamic loader may still hold a stale cache, so if
+                // the freshly-installed libs aren't picked up here, exit cleanly and let the
+                // supervisor (HiveOS/PM2) relaunch us with a fresh loader cache.
+                match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
+                    Ok(keryx_miner::slm::GpuProbe::Ok) => {
+                        info!("CUDA libs installed — GPU inference verified, starting mining.");
+                    }
+                    _ => {
+                        info!("CUDA libs installed successfully — restarting miner to activate them.");
+                        std::process::exit(0);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                error!("CUDA GPU detected but a CUDA runtime lib failed to load — install the CUDA 12.6 toolkit and restart.");
+                return Err("CUDA runtime libs missing — cannot start OPoI mining".into());
+            }
+        }
+        Err(e) => {
+            error!("GPU probe task panicked: {}", e);
             return Err(e.into());
         }
     }
