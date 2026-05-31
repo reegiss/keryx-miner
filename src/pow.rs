@@ -27,6 +27,7 @@ pub enum BlockSeed {
         id: String,
         header_hash: [u64; 4],
         timestamp: u64,
+        daa_score: u64,
         nonce: u64,
         target: Uint256,
         nonce_mask: u64,
@@ -96,6 +97,7 @@ impl State {
             BlockSeed::PartialBlock {
                 ref header_hash,
                 ref timestamp,
+                daa_score: ref block_daa_score,
                 ref target,
                 nonce_fixed: fixed,
                 nonce_mask: mask,
@@ -104,7 +106,7 @@ impl State {
                 pre_pow_hash = Hash::new(*header_hash);
                 header_timestamp = *timestamp;
                 header_target = *target;
-                daa_score = 0; // stratum shares have no daa_score; always use v1 salt
+                daa_score = *block_daa_score;
                 nonce_mask = mask;
                 nonce_fixed = fixed
             }

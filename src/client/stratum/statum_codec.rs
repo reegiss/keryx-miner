@@ -37,6 +37,7 @@ pub(crate) struct StratumError(pub(crate) ErrorCode, pub(crate) String, #[serde(
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub(crate) enum MiningNotify {
+    MiningNotifyShortV2((String, [u64; 4], u64, u64)),
     MiningNotifyShort((String, [u64; 4], u64)),
     MiningNotifyLong((String, String, String, String, Vec<String>, String, String, String, bool)),
 }

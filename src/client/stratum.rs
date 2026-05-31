@@ -35,6 +35,7 @@ use tokio_util::sync::{PollSendError, PollSender};
 
 //const DIFFICULTY_1_TARGET: Uint256 = Uint256([0x00000000ffff0000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000]);
 const DIFFICULTY_1_TARGET: (u64, i16) = (0xffffu64, 208); // 0xffff 2^208
+const KERYX_STRATUM_DAA_CAPABILITY: &str = "keryx-stratum-v2";
 const LOG_RATE: Duration = Duration::from_secs(30);
 
 type BlockHandle = JoinHandle<Result<(), PollSendError<StratumLine>>>;
@@ -115,9 +116,9 @@ impl Client for StratumHandler {
             .send(StratumLine {
                 id,
                 payload: StratumLinePayload::StratumCommand(StratumCommand::Subscribe(
-                    MiningSubscribe::MiningSubscribeDefault((
+                    MiningSubscribe::MiningSubscribeOptions((
                         format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-                        //self.extranonce.clone().unwrap_or("0xffffffff".into())
+                        KERYX_STRATUM_DAA_CAPABILITY.into(),
                     )),
                 )),
                 jsonrpc: None,
@@ -305,6 +306,29 @@ impl StratumHandler {
                             ref nonce_size,
                         ))) => self.set_extranonce(extranonce.as_str(), nonce_size),
                         StratumCommand::MiningSetDifficulty((ref difficulty,)) => self.set_difficulty(difficulty),
+                        StratumCommand::MiningNotify(MiningNotify::MiningNotifyShortV2((
+                            id,
+                            header_hash,
+                            timestamp,
+                            daa_score,
+                        ))) => {
+                            self.block_template_ctr
+                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % 10_000))
+                                .unwrap();
+                            miner
+                                .process_block(Some(PartialBlock {
+                                    id,
+                                    header_hash,
+                                    timestamp,
+                                    daa_score,
+                                    nonce: 0,
+                                    target: self.target_pool,
+                                    nonce_mask: self.nonce_mask,
+                                    nonce_fixed: self.nonce_fixed,
+                                    hash: None,
+                                }))
+                                .await
+                        }
                         StratumCommand::MiningNotify(MiningNotify::MiningNotifyShort((id, header_hash, timestamp))) => {
                             self.block_template_ctr
                                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % 10_000))
@@ -314,6 +338,7 @@ impl StratumHandler {
                                     id,
                                     header_hash,
                                     timestamp,
+                                    daa_score: crate::pow::heavy_hash::POW_SALT_V2_ACTIVATION_DAA,
                                     nonce: 0,
                                     target: self.target_pool,
                                     nonce_mask: self.nonce_mask,
