@@ -467,7 +467,7 @@ impl StratumHandler {
                                 .await
                         }
                         StratumCommand::MiningChallenge((model_id_hex, nonce_hex)) => {
-                            self.handle_challenge(model_id_hex, nonce_hex).await;
+                            self.handle_challenge(model_id_hex, nonce_hex, miner).await;
                             Ok(())
                         }
                         _ => Err(format!("Unexpected stratum message: {:?}", msg).into()),
@@ -562,7 +562,7 @@ impl StratumHandler {
     /// The bridge relays the node's periodic capability challenge: the miner must prove
     /// it has the requested model loaded and can produce inference output. The result is
     /// sent back as `mining.challenge_response` so the bridge can forward it to the node.
-    async fn handle_challenge(&self, model_id_hex: String, nonce_hex: String) {
+    async fn handle_challenge(&mut self, model_id_hex: String, nonce_hex: String, miner: &mut MinerManager) {
         // Only one challenge in flight at a time — bridge will re-challenge if needed.
         if self.challenge_in_flight.swap(true, Ordering::SeqCst) {
             warn!("OPoI challenge: already in flight, dropping new challenge for model {:.8}", model_id_hex);
@@ -587,20 +587,27 @@ impl StratumHandler {
             return;
         }
 
-        info!("OPoI challenge: model={:.8} nonce={:.8} — spawning inference", model_id_hex, nonce_hex);
+        // Pause PoW so the GPU is fully available for the challenge inference.
+        let miner_flag = miner.opoi_challenge_flag();
+        miner_flag.store(true, Ordering::SeqCst);
+        miner.process_block(None).await.ok();
+
+        info!("OPoI challenge: PoW suspended — model={:.8} nonce={:.8}", model_id_hex, nonce_hex);
 
         let prompt = format!("Keryx inference challenge {}: briefly describe what you are.", nonce_hex);
         let send_channel = self.send_channel.clone();
-        let flag = Arc::clone(&self.challenge_in_flight);
+        let challenge_flag = Arc::clone(&self.challenge_in_flight);
 
         tokio::task::spawn_blocking(move || {
             let result = keryx_miner::slm::load_and_run_inference(&model_id, &prompt, CHALLENGE_MAX_TOKENS);
             let text = result.unwrap_or_default();
-            flag.store(false, Ordering::SeqCst);
+            // Clear both flags — PoW resumes on the next mining.notify from the bridge.
+            miner_flag.store(false, Ordering::SeqCst);
+            challenge_flag.store(false, Ordering::SeqCst);
             if text.is_empty() {
                 warn!("OPoI challenge: inference returned empty text for model {:.8}", model_id_hex);
             } else {
-                info!("OPoI challenge: done for model {:.8} ({} chars)", model_id_hex, text.len());
+                info!("OPoI challenge: done for model {:.8} ({} chars) — PoW resumes on next notify", model_id_hex, text.len());
             }
             let line = make_challenge_response_line(&model_id_hex, &text);
             if send_channel.blocking_send(line).is_err() {
