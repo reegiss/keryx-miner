@@ -188,6 +188,7 @@ async fn get_client(
             mining_address.clone(),
             mine_when_not_synced,
             Some(block_template_ctr.clone()),
+            ipfs_url.clone(),
         )
         .await?)
     } else if keryxd_address.starts_with("grpc://") {

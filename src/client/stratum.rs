@@ -1,5 +1,5 @@
 use futures::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -31,14 +31,48 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::{PollSendError, PollSender};
 
 //const DIFFICULTY_1_TARGET: Uint256 = Uint256([0x00000000ffff0000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000]);
 const DIFFICULTY_1_TARGET: (u64, i16) = (0xffffu64, 208); // 0xffff 2^208
 const KERYX_STRATUM_DAA_CAPABILITY: &str = "keryx-stratum-v2";
 const LOG_RATE: Duration = Duration::from_secs(30);
 
-type BlockHandle = JoinHandle<Result<(), PollSendError<StratumLine>>>;
+// ── Phase 2 OPoI — inference cache & task types ─────────────────────────────
+
+/// AiRequest task dispatched by the bridge in a `mining.notify` 5th parameter (JSON).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
+struct AiTask {
+    #[serde(default)]
+    stable_id: String,
+    model_id_hex: String,
+    prompt: String,
+    max_tokens: usize,
+    #[serde(default)]
+    inference_reward: u64,
+    #[serde(default)]
+    request_hash: String,
+}
+
+/// Task attached to the current mining job, cleared on each new `mining.notify`.
+struct CurrentTask {
+    job_id: String,
+    task: AiTask,
+}
+
+/// Shared inference result cache — persists across block changes so that if the
+/// same AiRequest is included in multiple consecutive job templates the miner can
+/// immediately submit with a CID once inference completed for the first occurrence.
+struct InferenceCacheInner {
+    /// stable_id → base58 CIDv0 string returned by IPFS after upload.
+    results: HashMap<String, String>,
+    /// stable_ids currently being inferred (guards against duplicate spawn_blocking calls).
+    in_progress: HashSet<String>,
+}
+
+type InferenceCache = Arc<Mutex<InferenceCacheInner>>;
+
+type BlockHandle = JoinHandle<()>;
 
 #[derive(Default)]
 pub struct ShareStats {
@@ -101,6 +135,13 @@ pub struct StratumHandler {
     shares_stats: Arc<ShareStats>,
     block_channel: Sender<BlockSeed>,
     block_handle: BlockHandle,
+
+    /// IPFS Kubo API URL for uploading inference results (e.g. "http://127.0.0.1:5001").
+    ipfs_url: String,
+    /// Task dispatched by the bridge for the current mining job (None = no AiRequest in job).
+    current_task_slot: Arc<Mutex<Option<CurrentTask>>>,
+    /// Completed inferences: stable_id → base58 CIDv0 string (persists across block changes).
+    inference_cache: InferenceCache,
 }
 
 #[async_trait(?Send)]
@@ -182,6 +223,7 @@ impl StratumHandler {
         miner_address: String,
         mine_when_not_synced: bool,
         block_template_ctr: Option<Arc<AtomicU16>>,
+        ipfs_url: String,
     ) -> Result<Box<Self>, Error> {
         info!("Connecting to {}", address);
         let socket = TcpStream::connect(address).await?;
@@ -193,11 +235,18 @@ impl StratumHandler {
 
         let share_state = SHARE_STATS.get_or_init(|| Arc::new(ShareStats::default())).clone();
         let last_stratum_id = Arc::new(AtomicU32::new(0));
+        let current_task_slot: Arc<Mutex<Option<CurrentTask>>> = Arc::new(Mutex::new(None));
+        let inference_cache: InferenceCache = Arc::new(Mutex::new(InferenceCacheInner {
+            results: HashMap::new(),
+            in_progress: HashSet::new(),
+        }));
         let (block_channel, block_handle) = Self::create_block_channel(
             send_channel.clone(),
             miner_address.clone(),
             last_stratum_id.clone(),
             share_state.clone(),
+            Arc::clone(&current_task_slot),
+            Arc::clone(&inference_cache),
         );
         Ok(Box::new(Self {
             log_handler: task::spawn(Self::log_shares(share_state.clone())),
@@ -219,6 +268,9 @@ impl StratumHandler {
             mining_dev: None,
             block_channel,
             block_handle,
+            ipfs_url,
+            current_task_slot,
+            inference_cache,
         }))
     }
 
@@ -227,32 +279,61 @@ impl StratumHandler {
         miner_address: String,
         last_stratum_id: Arc<AtomicU32>,
         share_stats: Arc<ShareStats>,
+        current_task_slot: Arc<Mutex<Option<CurrentTask>>>,
+        inference_cache: InferenceCache,
     ) -> (Sender<BlockSeed>, BlockHandle) {
         let (send, recv) = mpsc::channel::<BlockSeed>(1);
 
         let handle = tokio::spawn(async move {
-            ReceiverStream::new(recv)
-                .map(move |block_seed| {
-                    let (nonce, id) = match block_seed {
-                        BlockSeed::PartialBlock { ref nonce, ref id, .. } => (nonce, id),
-                        BlockSeed::FullBlock(_) => unreachable!(),
-                    };
-                    let msg_id = last_stratum_id.fetch_add(1, Ordering::SeqCst);
-                    {
-                        share_stats.shares_pending.try_lock().unwrap().insert(
-                            msg_id,
-                            //SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-                            id.clone(), //block_seed.clone()
-                        );
+            let mut recv_stream = ReceiverStream::new(recv);
+            while let Some(seed) = recv_stream.next().await {
+                let (nonce, job_id) = match seed {
+                    BlockSeed::PartialBlock { nonce, id, .. } => (nonce, id),
+                    BlockSeed::FullBlock(_) => unreachable!(),
+                };
+                let msg_id = last_stratum_id.fetch_add(1, Ordering::SeqCst);
+                share_stats.shares_pending.try_lock().unwrap().insert(msg_id, job_id.clone());
+                let nonce_hex = format!("{:016x}", nonce);
+                let opoi_tag = keryx_inference::tag_fixed(nonce);
+
+                // Phase 2: check inference cache for the current job's task
+                let cid_opt = {
+                    let task_guard = current_task_slot.lock().await;
+                    if let Some(ref ct) = *task_guard {
+                        if ct.job_id == job_id && !ct.task.stable_id.is_empty() {
+                            let cache_guard = inference_cache.lock().await;
+                            cache_guard.results.get(&ct.task.stable_id).cloned()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
-                    let nonce_hex = format!("{:016x}", nonce);
-                    let opoi_tag = keryx_inference::tag_fixed(*nonce);
+                };
+
+                let line = if let Some(cid) = cid_opt {
+                    info!("OPoI Phase 2: submitting share with CID for job {}", job_id);
+                    StratumLine {
+                        id: Some(msg_id),
+                        payload: StratumLinePayload::StratumCommand(StratumCommand::MiningSubmit(
+                            MiningSubmit::MiningSubmitWithCID((
+                                miner_address.clone(),
+                                job_id,
+                                nonce_hex,
+                                opoi_tag,
+                                cid,
+                            )),
+                        )),
+                        jsonrpc: None,
+                        error: None,
+                    }
+                } else {
                     StratumLine {
                         id: Some(msg_id),
                         payload: StratumLinePayload::StratumCommand(StratumCommand::MiningSubmit(
                             MiningSubmit::MiningSubmitWithTag((
                                 miner_address.clone(),
-                                id.into(),
+                                job_id,
                                 nonce_hex,
                                 opoi_tag,
                             )),
@@ -260,10 +341,12 @@ impl StratumHandler {
                         jsonrpc: None,
                         error: None,
                     }
-                })
-                .map(Ok)
-                .forward(PollSender::new(send_channel))
-                .await
+                };
+
+                if send_channel.send(line).await.is_err() {
+                    break;
+                }
+            }
         });
         (send, handle)
     }
@@ -309,6 +392,32 @@ impl StratumHandler {
                             ref nonce_size,
                         ))) => self.set_extranonce(extranonce.as_str(), nonce_size),
                         StratumCommand::MiningSetDifficulty((ref difficulty,)) => self.set_difficulty(difficulty),
+                        // Phase 2 OPoI: bridge dispatches an AiRequest task alongside the block.
+                        StratumCommand::MiningNotify(MiningNotify::MiningNotifyWithTask((
+                            id,
+                            header_hash,
+                            timestamp,
+                            daa_score,
+                            task_json,
+                        ))) => {
+                            self.block_template_ctr
+                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % 10_000))
+                                .unwrap();
+                            self.handle_ai_task(id.clone(), task_json).await;
+                            miner
+                                .process_block(Some(PartialBlock {
+                                    id,
+                                    header_hash,
+                                    timestamp,
+                                    daa_score,
+                                    nonce: 0,
+                                    target: self.target_pool,
+                                    nonce_mask: self.nonce_mask,
+                                    nonce_fixed: self.nonce_fixed,
+                                    hash: None,
+                                }))
+                                .await
+                        }
                         StratumCommand::MiningNotify(MiningNotify::MiningNotifyShortV2((
                             id,
                             header_hash,
@@ -318,6 +427,8 @@ impl StratumHandler {
                             self.block_template_ctr
                                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % 10_000))
                                 .unwrap();
+                            // No AiRequest in this job — clear the task slot.
+                            *self.current_task_slot.lock().await = None;
                             miner
                                 .process_block(Some(PartialBlock {
                                     id,
@@ -336,6 +447,7 @@ impl StratumHandler {
                             self.block_template_ctr
                                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some((v + 1) % 10_000))
                                 .unwrap();
+                            *self.current_task_slot.lock().await = None;
                             miner
                                 .process_block(Some(PartialBlock {
                                     id,
@@ -434,11 +546,117 @@ impl StratumHandler {
             info!("{}", shares_info)
         }
     }
+
+    /// Parse the task JSON from a `MiningNotifyWithTask`, store it in `current_task_slot`,
+    /// and spawn a background inference+IPFS upload if the result is not already cached.
+    async fn handle_ai_task(&mut self, job_id: String, task_json: String) {
+        let task: AiTask = match serde_json::from_str(&task_json) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("OPoI: failed to parse task JSON from bridge: {}", e);
+                *self.current_task_slot.lock().await = None;
+                return;
+            }
+        };
+
+        // Store task for this job so create_block_channel can look up the CID.
+        *self.current_task_slot.lock().await = Some(CurrentTask { job_id, task: task.clone() });
+
+        // Skip inference if stable_id is missing (malformed task) or already done/running.
+        if task.stable_id.is_empty() {
+            return;
+        }
+        let already_handled = {
+            let cache = self.inference_cache.lock().await;
+            cache.results.contains_key(&task.stable_id) || cache.in_progress.contains(&task.stable_id)
+        };
+        if already_handled {
+            return;
+        }
+
+        // Decode model_id hex and check it is ready on disk.
+        let model_id_bytes = match hex::decode(&task.model_id_hex) {
+            Ok(b) if b.len() == 32 => b,
+            _ => {
+                warn!("OPoI [{}]: invalid model_id_hex '{}'", task.stable_id, task.model_id_hex);
+                return;
+            }
+        };
+        let mut model_id = [0u8; 32];
+        model_id.copy_from_slice(&model_id_bytes);
+
+        if !keryx_miner::slm::is_model_ready(&model_id) {
+            warn!("OPoI [{}]: model not ready — inference skipped", task.stable_id);
+            return;
+        }
+
+        // Mark in-progress and spawn the blocking inference + IPFS upload.
+        {
+            let mut cache = self.inference_cache.lock().await;
+            cache.in_progress.insert(task.stable_id.clone());
+        }
+        let stable_id = task.stable_id.clone();
+        let prompt = task.prompt.clone();
+        let max_tokens = task.max_tokens;
+        let ipfs_url = self.ipfs_url.clone();
+        let cache_ref = Arc::clone(&self.inference_cache);
+
+        tokio::task::spawn_blocking(move || {
+            run_inference_and_upload(model_id, prompt, max_tokens, ipfs_url, stable_id, cache_ref);
+        });
+    }
 }
 
 impl Drop for StratumHandler {
     fn drop(&mut self) {
         self.log_handler.abort();
         self.block_handle.abort()
+    }
+}
+
+// ── Phase 2 OPoI — blocking inference helpers ────────────────────────────────
+
+/// Runs SLM inference, uploads the result to IPFS, then stores the CID in the cache.
+/// Called from `spawn_blocking` — must not call async functions.
+fn run_inference_and_upload(
+    model_id: [u8; 32],
+    prompt: String,
+    max_tokens: usize,
+    ipfs_url: String,
+    stable_id: String,
+    cache: InferenceCache,
+) {
+    let cid_opt = do_inference_and_upload(&model_id, &prompt, max_tokens, &ipfs_url, &stable_id);
+    let mut guard = cache.blocking_lock();
+    guard.in_progress.remove(&stable_id);
+    if let Some(cid) = cid_opt {
+        guard.results.insert(stable_id, cid);
+    }
+}
+
+fn do_inference_and_upload(
+    model_id: &[u8; 32],
+    prompt: &str,
+    max_tokens: usize,
+    ipfs_url: &str,
+    stable_id: &str,
+) -> Option<String> {
+    info!("OPoI [{}]: starting SLM inference (max_tokens={})", stable_id, max_tokens);
+    let text = keryx_miner::slm::load_and_run_inference(model_id, prompt, max_tokens)?;
+    if text.is_empty() {
+        warn!("OPoI [{}]: inference returned empty text — skipping IPFS upload", stable_id);
+        return None;
+    }
+    match crate::ipfs::upload(&text, ipfs_url) {
+        Ok(cid_bytes) => {
+            // Convert raw 34-byte multihash to base58 CIDv0 string via AiResponsePayload helper.
+            let cid = keryx_inference::AiResponsePayload::new([0u8; 32], 0, cid_bytes, 0).cid_v0();
+            info!("OPoI [{}]: inference complete, IPFS CID={}", stable_id, cid);
+            Some(cid)
+        }
+        Err(e) => {
+            warn!("OPoI [{}]: IPFS upload failed: {}", stable_id, e);
+            None
+        }
     }
 }

@@ -37,6 +37,8 @@ pub(crate) struct StratumError(pub(crate) ErrorCode, pub(crate) String, #[serde(
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub(crate) enum MiningNotify {
+    // 5-element: job_id, header_hash, timestamp, daa_score, task_json (AiRequest payload)
+    MiningNotifyWithTask((String, [u64; 4], u64, u64, String)),
     MiningNotifyShortV2((String, [u64; 4], u64, u64)),
     MiningNotifyShort((String, [u64; 4], u64)),
     MiningNotifyLong((String, String, String, String, Vec<String>, String, String, String, bool)),
@@ -45,9 +47,10 @@ pub(crate) enum MiningNotify {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum MiningSubmit {
+    // 5-element: address, job_id, nonce, opoi_tag, ipfs_cid (Phase 2 full inference submit)
+    MiningSubmitWithCID((String, String, String, String, String)),
     MiningSubmitWithTag((String, String, String, String)), // address, job_id, nonce, opoi_tag
     MiningSubmitShort((String, String, String)),
-    MiningSubmitLong((String, String, String, String, String)),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
