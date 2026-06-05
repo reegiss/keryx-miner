@@ -112,10 +112,10 @@ impl State {
             }
         }
 
-        let use_v2 = daa_score >= crate::pow::heavy_hash::POW_SALT_V2_ACTIVATION_DAA;
+        let salt_version = crate::pow::heavy_hash::active_salt_version(daa_score);
         // PRE_POW_HASH || TIME || 32 zero byte padding || NONCE
         let hasher = PowHasher::new(pre_pow_hash, header_timestamp);
-        let matrix = Arc::new(Matrix::generate(pre_pow_hash, use_v2));
+        let matrix = Arc::new(Matrix::generate(pre_pow_hash, salt_version));
         let mut pow_hash_header = [0u8; 72];
 
         pow_hash_header.copy_from_slice(

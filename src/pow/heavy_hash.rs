@@ -7,6 +7,7 @@ use std::mem::MaybeUninit;
 /// matrix than the node and every submitted block will be rejected.
 const KERYX_MATRIX_SALT_V1: [u8; 32] = *b"KERYX:KeryxHash-v1:2026-04-12:xx";
 const KERYX_MATRIX_SALT_V2: [u8; 32] = *b"KERYX:KeryxHash-v2:2026-05-29:xx";
+const KERYX_MATRIX_SALT_V3: [u8; 32] = *b"KERYX:KeryxHash-v3:2026-06-05:xx";
 
 /// DAA score at which the miner switches to SALT v2 — must match `pow_salt_v2_activation`
 /// in network params. Miners compiled before this update will keep using v1 and their
@@ -15,6 +16,26 @@ const KERYX_MATRIX_SALT_V2: [u8; 32] = *b"KERYX:KeryxHash-v2:2026-05-29:xx";
 /// Mainnet: 17_275_000 (2026-05-30 ~15:00 UTC emergency activation)
 /// Testnet: 6_000
 pub const POW_SALT_V2_ACTIVATION_DAA: u64 = 17_275_000;
+
+/// DAA score at which the miner switches to SALT v3 (chain relaunch) — must match
+/// `pow_salt_v3_activation` in network params. The matrix is generated host-side here
+/// (the CUDA kernel receives the precomputed matrix), so no kernel/PTX change is needed.
+///
+/// Mainnet: 21_932_751 (frozen relaunch tip virtual DAA)
+pub const POW_SALT_V3_ACTIVATION_DAA: u64 = 21_932_751;
+
+/// Returns the active matrix-salt version (1, 2 or 3) for a block at `daa_score`.
+/// Must mirror `active_salt_version` in `consensus/pow/src/lib.rs` (compared with `>=`).
+#[inline(always)]
+pub fn active_salt_version(daa_score: u64) -> u8 {
+    if daa_score >= POW_SALT_V3_ACTIVATION_DAA {
+        3
+    } else if daa_score >= POW_SALT_V2_ACTIVATION_DAA {
+        2
+    } else {
+        1
+    }
+}
 
 /// Round constants for wave_mix — same as `WAVE_MIX_KEYS` in matrix.rs.
 const WAVE_MIX_KEYS: [u64; 4] = [
@@ -56,10 +77,14 @@ pub struct Matrix(pub [[u16; 64]; 64]);
 
 impl Matrix {
     #[inline(always)]
-    pub fn generate(hash: Hash, use_v2_salt: bool) -> Self {
+    pub fn generate(hash: Hash, salt_version: u8) -> Self {
         // XOR the block-hash seed with the active Keryx domain salt before the PRNG.
         // Must match Matrix::generate() in consensus/pow/src/matrix.rs.
-        let salt = if use_v2_salt { &KERYX_MATRIX_SALT_V2 } else { &KERYX_MATRIX_SALT_V1 };
+        let salt: &[u8; 32] = match salt_version {
+            1 => &KERYX_MATRIX_SALT_V1,
+            2 => &KERYX_MATRIX_SALT_V2,
+            _ => &KERYX_MATRIX_SALT_V3,
+        };
         let salted = {
             let mut bytes = hash.to_le_bytes();
             bytes.iter_mut().zip(salt.iter()).for_each(|(b, s)| *b ^= s);
@@ -353,7 +378,7 @@ mod tests {
             [10, 5, 11, 14, 12, 1, 12, 7, 12, 8, 10, 5, 6, 10, 0, 7, 5, 6, 11, 11, 13, 12, 0, 13, 0, 6, 11, 0, 14, 4, 2, 1, 12, 7, 1, 10, 7, 15, 5, 3, 14, 15, 1, 3, 1, 2, 10, 4, 11, 8, 2, 11, 2, 5, 5, 4, 15, 5, 10, 3, 1, 7, 2, 14],
         ]);
         let hash = Hash::from_le_bytes([42; 32]);
-        let matrix = Matrix::generate(hash, false);
+        let matrix = Matrix::generate(hash, 1);
         assert_eq!(matrix, expected_matrix);
     }
 }
