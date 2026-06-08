@@ -163,7 +163,12 @@ impl KeryxdHandler {
         };
 
         let mut client = RpcClient::connect(address).await?;
-        let (send_channel, recv) = mpsc::channel(2);
+        // Outbound message channel to the node. ALL client->node messages share this:
+        // mining (submit_block, GetBlockTemplate) AND OPoI traffic (per-block GetBlock,
+        // escrow submit_transaction). With a capacity of 2 the OPoI traffic could fill the
+        // buffer and block GetBlockTemplate, stalling template delivery → the GPU sits idle
+        // between blocks. A large buffer keeps the mining requests from queuing behind OPoI.
+        let (send_channel, recv) = mpsc::channel(1024);
         send_channel.send(GetInfoRequestMessage {}.into()).await?;
         let stream = client.message_stream(ReceiverStream::new(recv)).await?.into_inner();
         let (block_channel, block_handle) = Self::create_block_channel(send_channel.clone());

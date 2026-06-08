@@ -506,8 +506,8 @@ impl StratumHandler {
                                     timestamp,
                                     // Short stratum notify carries no daa_score; pin it to the
                                     // current salt era so the host generates the right matrix.
-                                    // Post-relaunch the chain is on SALT v3, so force v3.
-                                    daa_score: crate::pow::heavy_hash::POW_SALT_V3_ACTIVATION_DAA,
+                                    // Post-relaunch the chain is on SALT v4, so force v4.
+                                    daa_score: crate::pow::heavy_hash::POW_SALT_V4_ACTIVATION_DAA,
                                     nonce: 0,
                                     target: self.target_pool,
                                     nonce_mask: self.nonce_mask,

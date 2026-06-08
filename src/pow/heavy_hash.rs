@@ -2,12 +2,13 @@ use crate::pow::{hasher::HeavyHasher, xoshiro::XoShiRo256PlusPlus};
 use crate::Hash;
 use std::mem::MaybeUninit;
 
-/// Domain-separation salts — must match `KERYX_MATRIX_SALT_V1/V2` in
+/// Domain-separation salts — must match `KERYX_MATRIX_SALT_V1/V2/V4` in
 /// `consensus/pow/src/matrix.rs` exactly or the miner will derive a different
 /// matrix than the node and every submitted block will be rejected.
+/// v3 is intentionally skipped: it belongs to the abandoned diff-spiral chain.
 const KERYX_MATRIX_SALT_V1: [u8; 32] = *b"KERYX:KeryxHash-v1:2026-04-12:xx";
 const KERYX_MATRIX_SALT_V2: [u8; 32] = *b"KERYX:KeryxHash-v2:2026-05-29:xx";
-const KERYX_MATRIX_SALT_V3: [u8; 32] = *b"KERYX:KeryxHash-v3:2026-06-05:xx";
+const KERYX_MATRIX_SALT_V4: [u8; 32] = *b"KERYX:KeryxHash-v4:2026-06-07:xx";
 
 /// DAA score at which the miner switches to SALT v2 — must match `pow_salt_v2_activation`
 /// in network params. Miners compiled before this update will keep using v1 and their
@@ -17,19 +18,19 @@ const KERYX_MATRIX_SALT_V3: [u8; 32] = *b"KERYX:KeryxHash-v3:2026-06-05:xx";
 /// Testnet: 6_000
 pub const POW_SALT_V2_ACTIVATION_DAA: u64 = 17_275_000;
 
-/// DAA score at which the miner switches to SALT v3 (chain relaunch) — must match
-/// `pow_salt_v3_activation` in network params. The matrix is generated host-side here
-/// (the CUDA kernel receives the precomputed matrix), so no kernel/PTX change is needed.
+/// DAA score at which the miner switches to SALT v4 (chain relaunch on stock difficulty) —
+/// must match `pow_salt_v4_activation` in network params. The matrix is generated host-side
+/// here (the CUDA kernel receives the precomputed matrix), so no kernel/PTX change is needed.
 ///
-/// Mainnet: 21_932_751 (frozen relaunch tip virtual DAA)
-pub const POW_SALT_V3_ACTIVATION_DAA: u64 = 21_932_751;
+/// Mainnet: 21_932_751 (same DAA as the old v3 gate; forks cleanly off the broken chain)
+pub const POW_SALT_V4_ACTIVATION_DAA: u64 = 21_932_751;
 
-/// Returns the active matrix-salt version (1, 2 or 3) for a block at `daa_score`.
+/// Returns the active matrix-salt version (1, 2 or 4) for a block at `daa_score`.
 /// Must mirror `active_salt_version` in `consensus/pow/src/lib.rs` (compared with `>=`).
 #[inline(always)]
 pub fn active_salt_version(daa_score: u64) -> u8 {
-    if daa_score >= POW_SALT_V3_ACTIVATION_DAA {
-        3
+    if daa_score >= POW_SALT_V4_ACTIVATION_DAA {
+        4
     } else if daa_score >= POW_SALT_V2_ACTIVATION_DAA {
         2
     } else {
@@ -83,7 +84,7 @@ impl Matrix {
         let salt: &[u8; 32] = match salt_version {
             1 => &KERYX_MATRIX_SALT_V1,
             2 => &KERYX_MATRIX_SALT_V2,
-            _ => &KERYX_MATRIX_SALT_V3,
+            _ => &KERYX_MATRIX_SALT_V4,
         };
         let salted = {
             let mut bytes = hash.to_le_bytes();

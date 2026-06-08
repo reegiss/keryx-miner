@@ -8,7 +8,9 @@
 use blake2b_simd::Params as Blake2bParams;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use crate::proto::{
@@ -22,6 +24,14 @@ const NATIVE_SUBNETWORK: &str = "0000000000000000000000000000000000000000";
 const OP_CSV: u8 = 0xb1;
 const OP_CHECKSIG: u8 = 0xac;
 const SIG_HASH_ALL: u8 = 0x01;
+
+/// Drop done (claimed / terminally-slashed) entries every N processed blocks so the
+/// in-memory vector and the on-disk state stay bounded under a high block rate.
+const COMPACT_EVERY_BLOCKS: u32 = 2_000;
+/// Minimum wall-clock interval between state-file writes. Without this debounce the
+/// watcher rewrites the entire (multi-thousand-entry) state file on every block, which
+/// saturates the async client loop and starves block-template delivery → mining stalls.
+const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EscrowEntry {
@@ -87,6 +97,17 @@ pub struct EscrowWatcher {
     pub pending_claim_output_index: Option<u32>,
     /// DAA score of the most recent block seen — used to set per-entry orphan cooldowns.
     last_daa_score: u64,
+    /// O(1) dedup of tracked outpoints ("{txid}:{output_index}") so tracking a coinbase
+    /// output no longer scans all of `state.entries`. Rebuilt from `state` on load/compaction.
+    outpoint_set: HashSet<String>,
+    /// block_hash -> indices into `state.entries`, for O(reds) red-set slashing instead of
+    /// scanning every entry per red hash. Rebuilt on load/compaction; appended on track.
+    block_index: HashMap<String, Vec<usize>>,
+    /// Debounced persistence: pending unsaved changes + last write time.
+    dirty: bool,
+    last_save: Instant,
+    /// handle_block call counter, used to trigger periodic compaction.
+    blocks_since_compact: u32,
 }
 
 impl EscrowWatcher {
@@ -115,7 +136,7 @@ impl EscrowWatcher {
 
         info!("EscrowWatcher ready: pubkey={}", hex::encode(pubkey_bytes));
 
-        Ok(Self {
+        let mut watcher = Self {
             secp,
             secret_key,
             pubkey_bytes,
@@ -129,7 +150,53 @@ impl EscrowWatcher {
             pending_claim_txid: None,
             pending_claim_output_index: None,
             last_daa_score: 0,
-        })
+            outpoint_set: HashSet::new(),
+            block_index: HashMap::new(),
+            dirty: false,
+            last_save: Instant::now(),
+            blocks_since_compact: 0,
+        };
+        watcher.rebuild_indexes();
+        Ok(watcher)
+    }
+
+    /// (Re)build the in-memory lookup indexes from `state.entries`.
+    fn rebuild_indexes(&mut self) {
+        self.outpoint_set.clear();
+        self.block_index.clear();
+        for (i, e) in self.state.entries.iter().enumerate() {
+            self.outpoint_set.insert(format!("{}:{}", e.coinbase_txid, e.output_index));
+            if !e.block_hash.is_empty() {
+                self.block_index.entry(e.block_hash.clone()).or_default().push(i);
+            }
+        }
+    }
+
+    /// Drop done (claimed / terminally-slashed) entries and rebuild indexes.
+    /// Orphan-retry entries (slashed == false) are kept.
+    fn compact(&mut self) {
+        let before = self.state.entries.len();
+        self.state.entries.retain(|e| !e.claimed && !e.slashed);
+        if self.state.entries.len() != before {
+            self.rebuild_indexes();
+            self.mark_dirty();
+        }
+    }
+
+    #[inline]
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Persist state at most once per `STATE_SAVE_INTERVAL` to keep disk I/O off the
+    /// per-block hot path. Worst case on crash we lose a couple of seconds of tracking,
+    /// which is re-derived from the chain on the next blocks.
+    fn maybe_flush(&mut self) {
+        if self.dirty && self.last_save.elapsed() >= STATE_SAVE_INTERVAL {
+            self.save_state();
+            self.dirty = false;
+            self.last_save = Instant::now();
+        }
     }
 
     /// Return the 64-char hex x-only public key of the mining key.
@@ -143,28 +210,35 @@ impl EscrowWatcher {
         let daa_score = block.header.as_ref()?.daa_score;
         self.last_daa_score = daa_score;
 
+        // Periodic compaction so the entry vector / state file stay bounded under a flood.
+        self.blocks_since_compact += 1;
+        if self.blocks_since_compact >= COMPACT_EVERY_BLOCKS {
+            self.blocks_since_compact = 0;
+            self.compact();
+        }
+
         let block_hash = block.verbose_data.as_ref().map(|v| v.hash.clone()).unwrap_or_default();
 
         // Proactively slash entries whose coinbase block just entered the red set.
         // mergeSetRedsHashes lists blocks newly classified as red by this block's GHOSTDAG —
         // their coinbase UTXOs will never exist in the virtual UTXO set.
+        // O(reds) via block_index instead of scanning all entries per red hash.
         if let Some(verbose) = &block.verbose_data {
-            let mut dirty = false;
             for red_hash in &verbose.merge_set_reds_hashes {
-                if let Some(entry) = self.state.entries.iter_mut().find(|e| {
-                    !e.claimed && !e.slashed && !e.is_inference && !e.block_hash.is_empty() && &e.block_hash == red_hash
-                }) {
-                    warn!(
-                        "EscrowWatcher: block {} is red — permanently skipping coinbase={}…",
-                        &red_hash[..16.min(red_hash.len())],
-                        &entry.coinbase_txid[..16.min(entry.coinbase_txid.len())]
-                    );
-                    entry.slashed = true;
-                    dirty = true;
+                let Some(indices) = self.block_index.get(red_hash).cloned() else { continue };
+                for i in indices {
+                    if let Some(entry) = self.state.entries.get_mut(i) {
+                        if !entry.claimed && !entry.slashed && !entry.is_inference && !entry.block_hash.is_empty() {
+                            warn!(
+                                "EscrowWatcher: block {} is red — permanently skipping coinbase={}…",
+                                &red_hash[..16.min(red_hash.len())],
+                                &entry.coinbase_txid[..16.min(entry.coinbase_txid.len())]
+                            );
+                            entry.slashed = true;
+                            self.mark_dirty();
+                        }
+                    }
                 }
-            }
-            if dirty {
-                self.save_state();
             }
         }
 
@@ -177,15 +251,13 @@ impl EscrowWatcher {
 
         // Scan all coinbase outputs — a multi-blue mergeset produces one escrow output
         // per blue block, each at a different index.  Hardcoding index 1 would miss all
-        // escrow outputs beyond the first blue's pair.
-        let mut dirty = false;
+        // escrow outputs beyond the first blue's pair. O(1) dedup via outpoint_set.
         for (out_idx, output) in coinbase.outputs.iter().enumerate() {
             if let Some(spk) = &output.script_public_key {
+                let key = format!("{}:{}", coinbase_txid, out_idx);
                 if spk.script_public_key.to_lowercase() == self.escrow_script_hex
                     && spk.version == 0
-                    && !self.state.entries.iter().any(|e| {
-                        e.coinbase_txid == coinbase_txid && e.output_index == out_idx as u32
-                    })
+                    && !self.outpoint_set.contains(&key)
                 {
                     info!(
                         "EscrowWatcher: tracked escrow coinbase={}…[{}] daa={} amount={}",
@@ -194,6 +266,7 @@ impl EscrowWatcher {
                         daa_score,
                         output.amount
                     );
+                    let idx = self.state.entries.len();
                     self.state.entries.push(EscrowEntry {
                         coinbase_txid: coinbase_txid.clone(),
                         block_hash: block_hash.clone(),
@@ -207,14 +280,22 @@ impl EscrowWatcher {
                         orphan_retry_after_daa: None,
                         is_inference: false,
                     });
-                    dirty = true;
+                    self.outpoint_set.insert(key);
+                    if !block_hash.is_empty() {
+                        self.block_index.entry(block_hash.clone()).or_default().push(idx);
+                    }
+                    self.mark_dirty();
                 }
             }
         }
-        if dirty {
-            self.save_state();
-        }
 
+        let claim = self.find_claim(daa_score);
+        self.maybe_flush();
+        claim
+    }
+
+    /// Scan for the next matured, eligible escrow entry and build its claim TX (if any).
+    fn find_claim(&mut self, daa_score: u64) -> Option<RpcTransaction> {
         // Only one claim TX in flight at a time.
         if self.pending_claim_txid.is_some() {
             return None;
@@ -330,7 +411,8 @@ impl EscrowWatcher {
                 }
             }
         }
-        self.save_state();
+        self.mark_dirty();
+        self.maybe_flush();
     }
 
     fn build_claim_tx(&self, entry: &EscrowEntry) -> Result<RpcTransaction, String> {
@@ -401,7 +483,8 @@ impl EscrowWatcher {
         if escrow_amount == 0 {
             return;
         }
-        if self.state.entries.iter().any(|e| e.coinbase_txid == ai_request_txid && e.output_index == 1) {
+        let key = format!("{}:1", ai_request_txid);
+        if self.outpoint_set.contains(&key) {
             return;
         }
         info!(
@@ -423,7 +506,9 @@ impl EscrowWatcher {
             orphan_retry_after_daa: None,
             is_inference: true,
         });
-        self.save_state();
+        self.outpoint_set.insert(key);
+        self.mark_dirty();
+        self.maybe_flush();
     }
 
     fn save_state(&self) {
