@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v1
@@ -29,7 +29,7 @@ jobs:
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -54,7 +54,7 @@ jobs:
         os: [ ubuntu-latest, windows-latest ]
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Fix LibOpenCL on Linux
         if: runner.os == 'Linux'
@@ -93,7 +93,7 @@ jobs:
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -107,32 +107,32 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p kaspa-miner
+          args: -p keryx-miner
 
       - name: Run cargo test no asm
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p kaspa-miner --features=no-asm
+          args: -p keryx-miner --features=no-asm
 
 
       - name: Run cargo test no parking_lot
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p kaspa-miner --no-default-features
+          args: -p keryx-miner --no-default-features
 
       - name: Run cargo test shuttle
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p kaspa-miner --no-default-features --features=shuttle
+          args: -p keryx-miner --no-default-features --features=shuttle
 
-      - name: Run cargo test for kaspaopencl
+      - name: Run cargo test for keryxopencl
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -p kaspaopencl
+          args: -p keryxopencl
 
 
   test-release:
@@ -144,7 +144,7 @@ jobs:
         os: [ ubuntu-latest, windows-latest ]
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Fix LibOpenCL on Linux
         if: runner.os == 'Linux'
@@ -183,7 +183,7 @@ jobs:
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -197,38 +197,38 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --release -p kaspa-miner
+          args: --release -p keryx-miner
 
       - name: Run cargo test release no asm
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --features=no-asm --release -p kaspa-miner
+          args: --features=no-asm --release -p keryx-miner
 
       - name: Run cargo test release no parking_lot
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --no-default-features --release -p kaspa-miner
+          args: --no-default-features --release -p keryx-miner
 
       - name: Run cargo test release shuttle
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --no-default-features --features=shuttle --release -p kaspa-miner
+          args: --no-default-features --features=shuttle --release -p keryx-miner
 
-      - name: Run cargo test for kaspaopencl
+      - name: Run cargo test for keryxopencl
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --release -p kaspaopencl
+          args: --release -p keryxopencl
 
   lints:
     name: Lints
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v1
@@ -249,7 +249,7 @@ jobs:
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
