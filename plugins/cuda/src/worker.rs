@@ -140,6 +140,12 @@ impl<'gpu> Worker for CudaGPUWorker<'gpu> {
         self.final_nonce_buff.copy_to(nonces)?;
         Ok(())
     }
+
+    fn drain(&mut self) -> Result<(), Error> {
+        // Placeholder: single-stream; will be replaced with double-buffer drain in Task 5.
+        self.stop_event.synchronize()?;
+        Ok(())
+    }
 }
 
 impl<'gpu> CudaGPUWorker<'gpu> {
