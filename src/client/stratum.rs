@@ -195,18 +195,14 @@ impl Client for StratumHandler {
             .await?;
 
         // Declare loaded SLM models so the bridge can challenge with the right model.
-        let model_ids: Vec<String> = keryx_miner::slm::loaded_model_ids()
-            .into_iter()
-            .map(|id| hex::encode(id))
-            .collect();
+        let model_ids: Vec<String> =
+            keryx_miner::slm::loaded_model_ids().into_iter().map(|id| hex::encode(id)).collect();
         if !model_ids.is_empty() {
             info!("OPoI: declaring {} model(s) to pool bridge", model_ids.len());
             self.send_channel
                 .send(StratumLine {
                     id: None,
-                    payload: StratumLinePayload::StratumCommand(
-                        StratumCommand::MiningDeclareCapabilities(model_ids),
-                    ),
+                    payload: StratumLinePayload::StratumCommand(StratumCommand::MiningDeclareCapabilities(model_ids)),
                     jsonrpc: None,
                     error: None,
                 })
@@ -258,10 +254,8 @@ impl StratumHandler {
         let share_state = SHARE_STATS.get_or_init(|| Arc::new(ShareStats::default())).clone();
         let last_stratum_id = Arc::new(AtomicU32::new(0));
         let current_task_slot: Arc<Mutex<Option<CurrentTask>>> = Arc::new(Mutex::new(None));
-        let inference_cache: InferenceCache = Arc::new(Mutex::new(InferenceCacheInner {
-            results: HashMap::new(),
-            in_progress: HashSet::new(),
-        }));
+        let inference_cache: InferenceCache =
+            Arc::new(Mutex::new(InferenceCacheInner { results: HashMap::new(), in_progress: HashSet::new() }));
         let (block_channel, block_handle) = Self::create_block_channel(
             send_channel.clone(),
             miner_address.clone(),
@@ -354,12 +348,7 @@ impl StratumHandler {
                     StratumLine {
                         id: Some(msg_id),
                         payload: StratumLinePayload::StratumCommand(StratumCommand::MiningSubmit(
-                            MiningSubmit::MiningSubmitWithTag((
-                                miner_address.clone(),
-                                job_id,
-                                nonce_hex,
-                                opoi_tag,
-                            )),
+                            MiningSubmit::MiningSubmitWithTag((miner_address.clone(), job_id, nonce_hex, opoi_tag)),
                         )),
                         jsonrpc: None,
                         error: None,
@@ -433,8 +422,7 @@ impl StratumHandler {
                                 }
                                 return miner.process_block(None).await;
                             }
-                            let inference_started =
-                                self.handle_ai_task(id.clone(), task_json, miner).await;
+                            let inference_started = self.handle_ai_task(id.clone(), task_json, miner).await;
                             if inference_started {
                                 // PoW already paused inside handle_ai_task — do NOT feed a new
                                 // block template or the GPU immediately resumes hashing.
@@ -665,7 +653,11 @@ impl StratumHandler {
             if text.is_empty() {
                 warn!("OPoI challenge: inference returned empty text for model {:.8}", model_id_hex);
             } else {
-                info!("OPoI challenge: done for model {:.8} ({} chars) — PoW resumes on next notify", model_id_hex, text.len());
+                info!(
+                    "OPoI challenge: done for model {:.8} ({} chars) — PoW resumes on next notify",
+                    model_id_hex,
+                    text.len()
+                );
             }
             let line = make_challenge_response_line(&model_id_hex, &nonce_hex, &text);
             if send_channel.blocking_send(line).is_err() {

@@ -19,19 +19,17 @@ pub fn upload(text: &str, api_url: &str) -> anyhow::Result<[u8; 34]> {
         .timeout(Duration::from_secs(30))
         .send_bytes(body.as_bytes())
         .map_err(|e| anyhow::anyhow!("IPFS upload failed: {}", e))?;
-    let body = response.into_string()
-        .map_err(|e| anyhow::anyhow!("IPFS response read error: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("IPFS response parse error: {}", e))?;
-    let cid_str = json["Hash"].as_str()
-        .ok_or_else(|| anyhow::anyhow!("IPFS response missing Hash field: {:?}", json))?;
+    let body = response.into_string().map_err(|e| anyhow::anyhow!("IPFS response read error: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("IPFS response parse error: {}", e))?;
+    let cid_str =
+        json["Hash"].as_str().ok_or_else(|| anyhow::anyhow!("IPFS response missing Hash field: {:?}", json))?;
     cid_v0_to_multihash(cid_str)
 }
 
 /// Decode a base58btc CIDv0 string (e.g. "Qm...") into a 34-byte raw multihash.
 fn cid_v0_to_multihash(cid: &str) -> anyhow::Result<[u8; 34]> {
-    let bytes = base58btc_decode(cid)
-        .ok_or_else(|| anyhow::anyhow!("Invalid base58 CID: {}", cid))?;
+    let bytes = base58btc_decode(cid).ok_or_else(|| anyhow::anyhow!("Invalid base58 CID: {}", cid))?;
     if bytes.len() != 34 || bytes[0] != 0x12 || bytes[1] != 0x20 {
         return Err(anyhow::anyhow!("CID is not a CIDv0 sha2-256 multihash: {}", cid));
     }
@@ -71,10 +69,7 @@ fn base58btc_decode(input: &str) -> Option<Vec<u8>> {
 /// Check that the IPFS API at `api_url` is reachable.
 pub fn is_running(api_url: &str) -> bool {
     let url = format!("{}/api/v0/version", api_url.trim_end_matches('/'));
-    ureq::post(&url)
-        .timeout(Duration::from_secs(2))
-        .call()
-        .is_ok()
+    ureq::post(&url).timeout(Duration::from_secs(2)).call().is_ok()
 }
 
 /// Ensure the IPFS daemon is running. If not, download kubo and start it.
@@ -240,7 +235,9 @@ fn download_file(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 65_536];
     loop {
         let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         file.write_all(&buf[..n])?;
     }
     Ok(())
@@ -253,10 +250,7 @@ fn extract_ipfs_binary(archive: &std::path::Path, dest_dir: &std::path::Path) ->
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i)?;
             let name = entry.name().to_string();
-            let file_name = std::path::Path::new(&name)
-                .file_name()
-                .unwrap_or_default()
-                .to_os_string();
+            let file_name = std::path::Path::new(&name).file_name().unwrap_or_default().to_os_string();
             if file_name == "ipfs.exe" {
                 let mut out = std::fs::File::create(dest_dir.join(&file_name))?;
                 std::io::copy(&mut entry, &mut out)?;

@@ -3,11 +3,11 @@
 /// Models are loaded on demand when an AiRequest arrives and cached between
 /// consecutive requests for the same model. Mining pauses during inference.
 use anyhow::{anyhow, Context, Result};
-use candle_core::{DType, Device, Tensor};
 use candle_core::quantized::gguf_file;
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::llama::{Cache, Config, LlamaConfig, Llama};
+use candle_transformers::models::llama::{Cache, Config, Llama, LlamaConfig};
 use candle_transformers::models::quantized_llama::ModelWeights;
 use candle_transformers::models::quantized_qwen2::ModelWeights as Qwen2Weights;
 use std::io::{Read, Write};
@@ -18,8 +18,7 @@ use tokenizers::Tokenizer;
 use crate::models::{ModelFormat, ModelSpec};
 
 const IPFS_GATEWAY: &str = "https://keryx-labs.com";
-const SYSTEM_PROMPT_TINYLLAMA: &str =
-    "You are a Keryx Network AI — a decentralized assistant running on GPU miners. \
+const SYSTEM_PROMPT_TINYLLAMA: &str = "You are a Keryx Network AI — a decentralized assistant running on GPU miners. \
      No internet access. Be concise.";
 
 const SYSTEM_PROMPT_DEEPSEEK: &str =
@@ -94,25 +93,26 @@ fn model_dir(spec: &ModelSpec) -> std::path::PathBuf {
 
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     eprintln!("[keryx-miner] Downloading {} ...", url);
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| anyhow!("HTTP GET {}: {}", url, e))?;
+    let response = ureq::get(url).call().map_err(|e| anyhow!("HTTP GET {}: {}", url, e))?;
     let content_length: Option<u64> = response.header("Content-Length").and_then(|s| s.parse().ok());
     let mut reader = response.into_reader();
-    let mut file = std::fs::File::create(dest)
-        .with_context(|| format!("create {}", dest.display()))?;
+    let mut file = std::fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
     let mut downloaded: u64 = 0;
     let mut buf = vec![0u8; 65_536];
     loop {
         let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         file.write_all(&buf[..n])?;
         downloaded += n as u64;
         if let Some(total) = content_length {
-            eprint!("\r  {:.1}/{:.1} MB ({}%)   ",
+            eprint!(
+                "\r  {:.1}/{:.1} MB ({}%)   ",
                 downloaded as f64 / 1_000_000.0,
                 total as f64 / 1_000_000.0,
-                downloaded * 100 / total);
+                downloaded * 100 / total
+            );
             let _ = std::io::stderr().flush();
         }
     }
@@ -129,10 +129,18 @@ fn ensure_safetensors(spec: &ModelSpec) -> Result<(std::path::PathBuf, std::path
     let tok = dir.join("tokenizer.json");
     let cfg = dir.join("config.json");
     let ok_flag = dir.join(".ok");
-    let wts: Vec<_> = spec.weight_cids.iter().enumerate().map(|(i, _)| {
-        if spec.weight_cids.len() == 1 { dir.join("model.safetensors") }
-        else { dir.join(format!("model-{:05}-of-{:05}.safetensors", i + 1, spec.weight_cids.len())) }
-    }).collect();
+    let wts: Vec<_> = spec
+        .weight_cids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            if spec.weight_cids.len() == 1 {
+                dir.join("model.safetensors")
+            } else {
+                dir.join(format!("model-{:05}-of-{:05}.safetensors", i + 1, spec.weight_cids.len()))
+            }
+        })
+        .collect();
 
     // .ok sentinel written only after a complete download — guards against truncated files
     if tok.exists() && cfg.exists() && wts.iter().all(|p| p.exists()) && ok_flag.exists() {
@@ -142,10 +150,16 @@ fn ensure_safetensors(spec: &ModelSpec) -> Result<(std::path::PathBuf, std::path
     std::fs::create_dir_all(&dir)?;
     let _ = std::fs::remove_file(&ok_flag); // clear stale flag before re-downloading
     eprintln!("\n[keryx-miner] Downloading model '{}' via IPFS. This happens once.\n", spec.name);
-    if !tok.exists() { download_file(&ipfs_url(spec.tokenizer_cid), &tok)?; }
-    if !cfg.exists() { download_file(&ipfs_url(spec.config_cid), &cfg)?; }
+    if !tok.exists() {
+        download_file(&ipfs_url(spec.tokenizer_cid), &tok)?;
+    }
+    if !cfg.exists() {
+        download_file(&ipfs_url(spec.config_cid), &cfg)?;
+    }
     for (i, (cid, path)) in spec.weight_cids.iter().zip(wts.iter()).enumerate() {
-        if spec.weight_cids.len() > 1 { eprintln!("[keryx-miner] Shard {}/{}", i + 1, spec.weight_cids.len()); }
+        if spec.weight_cids.len() > 1 {
+            eprintln!("[keryx-miner] Shard {}/{}", i + 1, spec.weight_cids.len());
+        }
         download_file(&ipfs_url(cid), path)?;
     }
     std::fs::write(&ok_flag, b"").with_context(|| format!("write .ok flag {}", ok_flag.display()))?;
@@ -167,7 +181,9 @@ fn ensure_gguf(spec: &ModelSpec) -> Result<(std::path::PathBuf, std::path::PathB
     std::fs::create_dir_all(&dir)?;
     let _ = std::fs::remove_file(&ok_flag); // clear stale flag before re-downloading
     eprintln!("\n[keryx-miner] Downloading model '{}' via IPFS. This happens once.\n", spec.name);
-    if !tok.exists() { download_file(&ipfs_url(spec.tokenizer_cid), &tok)?; }
+    if !tok.exists() {
+        download_file(&ipfs_url(spec.tokenizer_cid), &tok)?;
+    }
     download_file(&ipfs_url(spec.weight_cids[0]), &gguf)?;
     std::fs::write(&ok_flag, b"").with_context(|| format!("write .ok flag {}", ok_flag.display()))?;
     eprintln!("[keryx-miner] Model '{}' ready.\n", spec.name);
@@ -182,7 +198,9 @@ fn ensure_gguf(spec: &ModelSpec) -> Result<(std::path::PathBuf, std::path::PathB
 /// hardcoded ID so generation always terminates even if the tokenizer exposes
 /// special tokens differently (e.g. via `added_tokens` vs the regular vocab).
 fn collect_stop_ids(tokenizer: &Tokenizer, names: &[&str], fallbacks: &[u32]) -> Vec<u32> {
-    let mut ids: Vec<u32> = names.iter().zip(fallbacks.iter())
+    let mut ids: Vec<u32> = names
+        .iter()
+        .zip(fallbacks.iter())
         .map(|(name, &fallback)| tokenizer.token_to_id(name).unwrap_or(fallback))
         .collect();
     ids.sort_unstable();
@@ -200,18 +218,18 @@ fn stop_config(tokenizer: &Tokenizer, name: &str) -> (Vec<u32>, Vec<&'static str
         //   128001 = <｜end▁of▁sentence｜> (real EOS), 128011 = <｜User｜> (new turn),
         //   128009 = <|eot_id|> (LLaMA-3 EOT, kept as a fallback).
         "deepseek-r1-8b" => (
-            collect_stop_ids(tokenizer,
+            collect_stop_ids(
+                tokenizer,
                 &["<｜end▁of▁sentence｜>", "<｜User｜>", "<|eot_id|>"],
-                &[128001, 128011, 128009]),
+                &[128001, 128011, 128009],
+            ),
             vec!["<｜end▁of▁sentence｜>", "<｜User｜>", "<|eot_id|>", "<|end_of_text|>"],
         ),
         // DeepSeek-R1-Distill-Qwen-32B — DeepSeek chat template (NOT ChatML):
         //   151643 = <｜end▁of▁sentence｜> (real EOS), 151644 = <｜User｜> (new turn).
         //   (151645 is <｜Assistant｜>, NOT an end token — must not stop on it.)
         "deepseek-r1-32b" => (
-            collect_stop_ids(tokenizer,
-                &["<｜end▁of▁sentence｜>", "<｜User｜>"],
-                &[151643, 151644]),
+            collect_stop_ids(tokenizer, &["<｜end▁of▁sentence｜>", "<｜User｜>"], &[151643, 151644]),
             // ASCII ChatML markers kept as an extra net if the model parrots them.
             vec!["<｜end▁of▁sentence｜>", "<｜User｜>", "<|im_end|>", "<|im_start|>"],
         ),
@@ -221,17 +239,12 @@ fn stop_config(tokenizer: &Tokenizer, name: &str) -> (Vec<u32>, Vec<&'static str
         //   128009 = <|eot_id|> (end of turn), 128001 = <|end_of_text|> (base EOS),
         //   128008 = <|eom_id|> (end of message, tool turns).
         "llama-3.3-70b" => (
-            collect_stop_ids(tokenizer,
-                &["<|eot_id|>", "<|end_of_text|>", "<|eom_id|>"],
-                &[128009, 128001, 128008]),
+            collect_stop_ids(tokenizer, &["<|eot_id|>", "<|end_of_text|>", "<|eom_id|>"], &[128009, 128001, 128008]),
             // Cut if the model tries to open a fresh turn instead of stopping.
             vec!["<|eot_id|>", "<|end_of_text|>", "<|start_header_id|>"],
         ),
         // TinyLlama / Zephyr: </s> ends a turn; 0 = padding safety net.
-        _ => (
-            collect_stop_ids(tokenizer, &["</s>"], &[2, 0]),
-            vec!["</s>", "<|user|>", "<|system|>", "<|assistant|>"],
-        ),
+        _ => (collect_stop_ids(tokenizer, &["</s>"], &[2, 0]), vec!["</s>", "<|user|>", "<|system|>", "<|assistant|>"]),
     }
 }
 
@@ -241,59 +254,64 @@ fn load_engine(spec: &'static ModelSpec, device: Device) -> Result<SlmEngine> {
     match spec.format {
         ModelFormat::Safetensors => {
             let (tok_path, cfg_path, wt_paths) = ensure_safetensors(spec)?;
-            let config: LlamaConfig = serde_json::from_str(
-                &std::fs::read_to_string(&cfg_path)?
-            ).context("parse config.json")?;
+            let config: LlamaConfig =
+                serde_json::from_str(&std::fs::read_to_string(&cfg_path)?).context("parse config.json")?;
             let config = config.into_config(false);
-            let tokenizer = Tokenizer::from_file(&tok_path)
-                .map_err(|e| anyhow!("load tokenizer: {}", e))?;
+            let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| anyhow!("load tokenizer: {}", e))?;
             let wt_refs: Vec<_> = wt_paths.iter().map(|p| p.as_path()).collect();
-            let vb = unsafe {
-                VarBuilder::from_mmaped_safetensors(&wt_refs, DType::F32, &device)
-            }.map_err(|e| anyhow!("mmap weights: {}", e))?;
+            let vb = unsafe { VarBuilder::from_mmaped_safetensors(&wt_refs, DType::F32, &device) }
+                .map_err(|e| anyhow!("mmap weights: {}", e))?;
             let model = Llama::load(vb, &config).map_err(|e| anyhow!("build model: {}", e))?;
             let (stop_token_ids, stop_strings) = stop_config(&tokenizer, spec.name);
             log::info!("SlmEngine: '{}' ready (stops={:?})", spec.name, stop_token_ids);
             Ok(SlmEngine {
-                model_id: spec.model_id, name: spec.name,
+                model_id: spec.model_id,
+                name: spec.name,
                 inner: ModelInner::Full { model, config, cache_dtype: DType::F32 },
-                tokenizer, device, stop_token_ids, stop_strings,
+                tokenizer,
+                device,
+                stop_token_ids,
+                stop_strings,
             })
         }
         ModelFormat::Gguf => {
             let (tok_path, gguf_path) = ensure_gguf(spec)?;
-            let tokenizer = Tokenizer::from_file(&tok_path)
-                .map_err(|e| anyhow!("load tokenizer: {}", e))?;
-            let mut gguf_file = std::fs::File::open(&gguf_path)
-                .with_context(|| format!("open {}", gguf_path.display()))?;
-            let content = gguf_file::Content::read(&mut gguf_file)
-                .map_err(|e| anyhow!("read gguf: {}", e))?;
+            let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| anyhow!("load tokenizer: {}", e))?;
+            let mut gguf_file =
+                std::fs::File::open(&gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
+            let content = gguf_file::Content::read(&mut gguf_file).map_err(|e| anyhow!("read gguf: {}", e))?;
             let model = ModelWeights::from_gguf(content, &mut gguf_file, &device)
                 .map_err(|e| anyhow!("load gguf weights: {}", e))?;
             let (stop_token_ids, stop_strings) = stop_config(&tokenizer, spec.name);
             log::info!("SlmEngine: '{}' ready (stops={:?})", spec.name, stop_token_ids);
             Ok(SlmEngine {
-                model_id: spec.model_id, name: spec.name,
+                model_id: spec.model_id,
+                name: spec.name,
                 inner: ModelInner::Quantized(model),
-                tokenizer, device, stop_token_ids, stop_strings,
+                tokenizer,
+                device,
+                stop_token_ids,
+                stop_strings,
             })
         }
         ModelFormat::GgufQwen2 => {
             let (tok_path, gguf_path) = ensure_gguf(spec)?;
-            let tokenizer = Tokenizer::from_file(&tok_path)
-                .map_err(|e| anyhow!("load tokenizer: {}", e))?;
-            let mut gguf_file = std::fs::File::open(&gguf_path)
-                .with_context(|| format!("open {}", gguf_path.display()))?;
-            let content = gguf_file::Content::read(&mut gguf_file)
-                .map_err(|e| anyhow!("read gguf: {}", e))?;
+            let tokenizer = Tokenizer::from_file(&tok_path).map_err(|e| anyhow!("load tokenizer: {}", e))?;
+            let mut gguf_file =
+                std::fs::File::open(&gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
+            let content = gguf_file::Content::read(&mut gguf_file).map_err(|e| anyhow!("read gguf: {}", e))?;
             let model = Qwen2Weights::from_gguf(content, &mut gguf_file, &device)
                 .map_err(|e| anyhow!("load qwen2 gguf weights: {}", e))?;
             let (stop_token_ids, stop_strings) = stop_config(&tokenizer, spec.name);
             log::info!("SlmEngine: '{}' ready (stops={:?})", spec.name, stop_token_ids);
             Ok(SlmEngine {
-                model_id: spec.model_id, name: spec.name,
+                model_id: spec.model_id,
+                name: spec.name,
                 inner: ModelInner::QuantizedQwen2(model),
-                tokenizer, device, stop_token_ids, stop_strings,
+                tokenizer,
+                device,
+                stop_token_ids,
+                stop_strings,
             })
         }
     }
@@ -369,8 +387,7 @@ fn generate(engine: &mut SlmEngine, prompt: &str, max_new_tokens: usize) -> Resu
     // Detect whether the assistant turn was primed with <think> (R1 models).
     // Uses contains() to handle both plain priming and think-injected variants.
     let is_think_primed = formatted.contains("<｜Assistant｜><think>");
-    let enc = engine.tokenizer.encode(formatted.as_str(), true)
-        .map_err(|e| anyhow!("encode: {}", e))?;
+    let enc = engine.tokenizer.encode(formatted.as_str(), true).map_err(|e| anyhow!("encode: {}", e))?;
     let mut all_tokens: Vec<u32> = enc.get_ids().to_vec();
     let mut generated: Vec<u32> = Vec::new();
     let mut lp = LogitsProcessor::new(42, Some(0.7), Some(0.9));
@@ -409,13 +426,16 @@ fn generate(engine: &mut SlmEngine, prompt: &str, max_new_tokens: usize) -> Resu
                 let input = Tensor::new(input_ids, &engine.device)
                     .and_then(|t| t.unsqueeze(0))
                     .map_err(|e| anyhow!("input tensor: {}", e))?;
-                let logits = model.forward(&input, pos, &mut cache)
-                    .map_err(|e| anyhow!("forward: {}", e))?;
+                let logits = model.forward(&input, pos, &mut cache).map_err(|e| anyhow!("forward: {}", e))?;
                 let next = sample_next(&logits, &mut lp, &all_tokens)?;
-                if engine.stop_token_ids.contains(&next) { break; }
+                if engine.stop_token_ids.contains(&next) {
+                    break;
+                }
                 all_tokens.push(next);
                 generated.push(next);
-                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) { break; }
+                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) {
+                    break;
+                }
             }
         }
         ModelInner::Quantized(model) => {
@@ -429,13 +449,16 @@ fn generate(engine: &mut SlmEngine, prompt: &str, max_new_tokens: usize) -> Resu
                 let input = Tensor::new(input_ids, &engine.device)
                     .and_then(|t| t.unsqueeze(0))
                     .map_err(|e| anyhow!("input tensor: {}", e))?;
-                let logits = model.forward(&input, pos)
-                    .map_err(|e| anyhow!("forward: {}", e))?;
+                let logits = model.forward(&input, pos).map_err(|e| anyhow!("forward: {}", e))?;
                 let next = sample_next(&logits, &mut lp, &all_tokens)?;
-                if engine.stop_token_ids.contains(&next) { break; }
+                if engine.stop_token_ids.contains(&next) {
+                    break;
+                }
                 all_tokens.push(next);
                 generated.push(next);
-                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) { break; }
+                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) {
+                    break;
+                }
             }
         }
         ModelInner::QuantizedQwen2(model) => {
@@ -449,25 +472,24 @@ fn generate(engine: &mut SlmEngine, prompt: &str, max_new_tokens: usize) -> Resu
                 let input = Tensor::new(input_ids, &engine.device)
                     .and_then(|t| t.unsqueeze(0))
                     .map_err(|e| anyhow!("input tensor: {}", e))?;
-                let logits = model.forward(&input, pos)
-                    .map_err(|e| anyhow!("forward: {}", e))?;
+                let logits = model.forward(&input, pos).map_err(|e| anyhow!("forward: {}", e))?;
                 let next = sample_next(&logits, &mut lp, &all_tokens)?;
-                if engine.stop_token_ids.contains(&next) { break; }
+                if engine.stop_token_ids.contains(&next) {
+                    break;
+                }
                 all_tokens.push(next);
                 generated.push(next);
-                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) { break; }
+                if hit_stop_string(&engine.tokenizer, &generated, &engine.stop_strings) {
+                    break;
+                }
             }
         }
     }
 
-    let text = engine.tokenizer.decode(&generated, true)
-        .map_err(|e| anyhow!("decode: {}", e))?;
+    let text = engine.tokenizer.decode(&generated, true).map_err(|e| anyhow!("decode: {}", e))?;
     // Truncate at the earliest stop string in case a control marker leaked into
     // the output (tokenizer that renders special tokens as plain text).
-    let cut = engine.stop_strings.iter()
-        .filter_map(|s| text.find(s))
-        .min()
-        .unwrap_or(text.len());
+    let cut = engine.stop_strings.iter().filter_map(|s| text.find(s)).min().unwrap_or(text.len());
     let answer = text[..cut].trim();
     // For R1 models, strip the <think>…</think> reasoning preamble so only the
     // final answer is published. Empty string = think block was cut by max_tokens
@@ -583,18 +605,20 @@ pub fn prefetch_models(specs: &'static [&'static ModelSpec]) -> Result<()> {
 
 /// Return the model_ids of supported models that have fully-downloaded files (.ok flag present).
 pub fn loaded_model_ids() -> Vec<[u8; 32]> {
-    SUPPORTED_SPECS.get()
-        .map(|specs| specs.iter()
-            .filter(|s| model_dir(s).join(".ok").exists())
-            .map(|s| s.model_id)
-            .collect())
+    SUPPORTED_SPECS
+        .get()
+        .map(|specs| specs.iter().filter(|s| model_dir(s).join(".ok").exists()).map(|s| s.model_id).collect())
         .unwrap_or_default()
 }
 
 /// True only when the model is supported and its files are completely downloaded.
 pub fn is_model_ready(model_id: &[u8; 32]) -> bool {
-    let Some(specs) = SUPPORTED_SPECS.get() else { return false; };
-    let Some(spec) = specs.iter().find(|s| &s.model_id == model_id) else { return false; };
+    let Some(specs) = SUPPORTED_SPECS.get() else {
+        return false;
+    };
+    let Some(spec) = specs.iter().find(|s| &s.model_id == model_id) else {
+        return false;
+    };
     model_dir(spec).join(".ok").exists()
 }
 
@@ -628,12 +652,20 @@ pub fn load_and_run_inference(model_id: &[u8; 32], prompt: &str, max_tokens: usi
                 Device::Cpu
             } else {
                 match Device::new_cuda(0) {
-                    Ok(d) => { log::info!("SlmEngine: CUDA device 0 active"); d }
-                    Err(e) => { log::warn!("SlmEngine: CUDA unavailable ({e}) — CPU fallback"); Device::Cpu }
+                    Ok(d) => {
+                        log::info!("SlmEngine: CUDA device 0 active");
+                        d
+                    }
+                    Err(e) => {
+                        log::warn!("SlmEngine: CUDA unavailable ({e}) — CPU fallback");
+                        Device::Cpu
+                    }
                 }
             };
             match load_engine(spec, device) {
-                Ok(e) => { *guard = Some(e); }
+                Ok(e) => {
+                    *guard = Some(e);
+                }
                 Err(e) => {
                     log::error!("SlmEngine: failed to load '{}': {}", spec.name, e);
                     return None;
@@ -659,8 +691,12 @@ pub fn load_and_run_inference(model_id: &[u8; 32], prompt: &str, max_tokens: usi
         Ok(output) => output,
         Err(_) => {
             log::error!("SlmEngine: inference panicked — engine evicted, will retry on next challenge");
-            log::error!("SlmEngine: cuBLAS missing? Run: sudo apt-get install -y libcublas-12-2 then restart the miner");
-            if let Ok(mut g) = ENGINE.lock() { *g = None; }
+            log::error!(
+                "SlmEngine: cuBLAS missing? Run: sudo apt-get install -y libcublas-12-2 then restart the miner"
+            );
+            if let Ok(mut g) = ENGINE.lock() {
+                *g = None;
+            }
             None
         }
     }

@@ -4,10 +4,14 @@ use log::LevelFilter;
 use crate::Error;
 
 #[derive(Parser, Debug)]
-#[clap(name = "keryx-miner", version, about = "A Keryx high performance GPU miner with OPoI inference\n\nModel tiers (default: TinyLlama + DeepSeek-8B — RTX 3060 12GB / 3070 / 3080):\n  --light      TinyLlama only — RTX 3060 6GB or any GPU\n  (default)    TinyLlama + DeepSeek-R1-8B — RTX 3060 12GB / 3070 / 3080\n  --high       + DeepSeek-R1-32B — RTX 3090 / 4090 (24GB+)\n  --very-high  + LLaMA-3.3-70B  — 48GB+ single-GPU (RTX 6000 Ada / A6000 / L40S)", term_width = 0)]
+#[clap(
+    name = "keryx-miner",
+    version,
+    about = "A Keryx high performance GPU miner with OPoI inference\n\nModel tiers (default: TinyLlama + DeepSeek-8B — RTX 3060 12GB / 3070 / 3080):\n  --light      TinyLlama only — RTX 3060 6GB or any GPU\n  (default)    TinyLlama + DeepSeek-R1-8B — RTX 3060 12GB / 3070 / 3080\n  --high       + DeepSeek-R1-32B — RTX 3090 / 4090 (24GB+)\n  --very-high  + LLaMA-3.3-70B  — 48GB+ single-GPU (RTX 6000 Ada / A6000 / L40S)",
+    term_width = 0
+)]
 pub struct Opt {
     // ── OPoI / Inference ─────────────────────────────────────────────────────
-
     #[clap(
         long = "light",
         help = "Model tier: TinyLlama only — any GPU (6GB+ VRAM)",
@@ -79,7 +83,6 @@ pub struct Opt {
     pub recover_escrow_api: String,
 
     // ── Mining ────────────────────────────────────────────────────────────────
-
     #[clap(short, long, help = "Enable debug logging level")]
     pub debug: bool,
 

@@ -13,9 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{fs, io};
 
-use crate::proto::{
-    RpcOutpoint, RpcScriptPublicKey, RpcTransaction, RpcTransactionInput, RpcTransactionOutput,
-};
+use crate::proto::{RpcOutpoint, RpcScriptPublicKey, RpcTransaction, RpcTransactionInput, RpcTransactionOutput};
 
 const CHALLENGE_WINDOW_BLOCKS: u64 = 36_000;
 const CLAIM_FEE_SOMPI: u64 = 30_000_000;
@@ -112,15 +110,14 @@ pub struct EscrowWatcher {
 
 impl EscrowWatcher {
     pub fn new(privkey_hex: &str, mining_address: &str, state_path: PathBuf) -> Result<Self, String> {
-        let privkey_bytes = hex::decode(privkey_hex)
-            .map_err(|e| format!("Invalid --mining-privkey hex: {}", e))?;
+        let privkey_bytes = hex::decode(privkey_hex).map_err(|e| format!("Invalid --mining-privkey hex: {}", e))?;
         if privkey_bytes.len() != 32 {
             return Err(format!("--mining-privkey must be 32 bytes (64 hex chars), got {}", privkey_bytes.len()));
         }
 
         let secp = secp256k1::Secp256k1::new();
-        let secret_key = secp256k1::SecretKey::from_slice(&privkey_bytes)
-            .map_err(|e| format!("Invalid private key: {}", e))?;
+        let secret_key =
+            secp256k1::SecretKey::from_slice(&privkey_bytes).map_err(|e| format!("Invalid private key: {}", e))?;
         let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret_key);
         let (xonly, _parity) = keypair.x_only_public_key();
         let pubkey_bytes: [u8; 32] = xonly.serialize();
@@ -351,16 +348,16 @@ impl EscrowWatcher {
         match error {
             None => {
                 info!("EscrowWatcher: claim accepted for coinbase={}…[{}]", &txid[..16.min(txid.len())], out_idx);
-                if let Some(e) = self.state.entries.iter_mut().find(|e| {
-                    e.coinbase_txid == txid && e.output_index == out_idx
-                }) {
+                if let Some(e) =
+                    self.state.entries.iter_mut().find(|e| e.coinbase_txid == txid && e.output_index == out_idx)
+                {
                     e.claimed = true;
                 }
             }
             Some(err_msg) => {
-                if let Some(e) = self.state.entries.iter_mut().find(|e| {
-                    e.coinbase_txid == txid && e.output_index == out_idx
-                }) {
+                if let Some(e) =
+                    self.state.entries.iter_mut().find(|e| e.coinbase_txid == txid && e.output_index == out_idx)
+                {
                     // Retriable rejections: sequence-lock timing races and orphan/dag-reorg
                     // situations where the coinbase's block is off the selected chain.
                     // Any other rejection (double-spend, script failure) is a real slash.
@@ -387,14 +384,12 @@ impl EscrowWatcher {
                             );
                             e.orphan_slashed = true;
                             // Per-entry cooldown: only this entry waits, other claims proceed.
-                            e.orphan_retry_after_daa =
-                                Some(self.last_daa_score + ORPHAN_RETRY_COOLDOWN_BLOCKS);
+                            e.orphan_retry_after_daa = Some(self.last_daa_score + ORPHAN_RETRY_COOLDOWN_BLOCKS);
                         }
                     } else if is_seq_lock {
                         // Apply a per-entry cooldown instead of retrying every block —
                         // the OP_CSV blue-score check may lag DAA score by a few blocks.
-                        e.orphan_retry_after_daa =
-                            Some(self.last_daa_score + SEQ_LOCK_RETRY_COOLDOWN_BLOCKS);
+                        e.orphan_retry_after_daa = Some(self.last_daa_score + SEQ_LOCK_RETRY_COOLDOWN_BLOCKS);
                         debug!(
                             "EscrowWatcher: claim rejected for coinbase={}…[{}] (sequence lock, retry after daa {})",
                             &txid[..16.min(txid.len())],
@@ -404,7 +399,9 @@ impl EscrowWatcher {
                     } else {
                         warn!(
                             "EscrowWatcher: claim rejected for coinbase={}…[{}]: {}",
-                            &txid[..16.min(txid.len())], out_idx, err_msg
+                            &txid[..16.min(txid.len())],
+                            out_idx,
+                            err_msg
                         );
                         e.slashed = true;
                     }
@@ -437,8 +434,8 @@ impl EscrowWatcher {
             amount_out,
         );
 
-        let msg = secp256k1::Message::from_digest_slice(&sighash)
-            .map_err(|e| format!("sighash message error: {}", e))?;
+        let msg =
+            secp256k1::Message::from_digest_slice(&sighash).map_err(|e| format!("sighash message error: {}", e))?;
         let keypair = secp256k1::Keypair::from_secret_key(&self.secp, &self.secret_key);
         let sig = self.secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
@@ -533,14 +530,10 @@ pub fn load_key(path: &str) -> Result<String, String> {
             path
         ));
     }
-    let s = fs::read_to_string(p)
-        .map_err(|e| format!("Failed to read escrow key file '{}': {}", path, e))?;
+    let s = fs::read_to_string(p).map_err(|e| format!("Failed to read escrow key file '{}': {}", path, e))?;
     let privkey = s.trim().to_string();
     if privkey.len() != 64 || !privkey.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!(
-            "Escrow key file '{}' must contain exactly 64 hex chars",
-            path
-        ));
+        return Err(format!("Escrow key file '{}' must contain exactly 64 hex chars", path));
     }
     Ok(privkey)
 }
@@ -551,8 +544,7 @@ pub fn load_or_generate_key(path: &str) -> Result<String, String> {
     use rand::RngCore;
     let p = std::path::Path::new(path);
     if p.exists() {
-        let s = fs::read_to_string(p)
-            .map_err(|e| format!("Failed to read escrow key file '{}': {}", path, e))?;
+        let s = fs::read_to_string(p).map_err(|e| format!("Failed to read escrow key file '{}': {}", path, e))?;
         let privkey = s.trim().to_string();
         if privkey.len() != 64 || !privkey.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!(
@@ -578,8 +570,7 @@ pub fn load_or_generate_key(path: &str) -> Result<String, String> {
     let (xonly, _) = kp.x_only_public_key();
     let pubkey_hex = hex::encode(xonly.serialize());
 
-    fs::write(p, &privkey_hex)
-        .map_err(|e| format!("Failed to write escrow key file '{}': {}", path, e))?;
+    fs::write(p, &privkey_hex).map_err(|e| format!("Failed to write escrow key file '{}': {}", path, e))?;
 
     info!("OPoI escrow keypair generated — saved to '{}'", path);
     info!("  Escrow pubkey : {}", pubkey_hex);
@@ -589,11 +580,9 @@ pub fn load_or_generate_key(path: &str) -> Result<String, String> {
 
 /// Derive the x-only public key hex (64 hex chars) from a hex-encoded private key.
 pub fn pubkey_hex_from_privkey(privkey_hex: &str) -> Result<String, String> {
-    let privkey_bytes = hex::decode(privkey_hex)
-        .map_err(|e| format!("Invalid privkey hex: {}", e))?;
+    let privkey_bytes = hex::decode(privkey_hex).map_err(|e| format!("Invalid privkey hex: {}", e))?;
     let secp = secp256k1::Secp256k1::new();
-    let sk = secp256k1::SecretKey::from_slice(&privkey_bytes)
-        .map_err(|e| format!("Invalid private key: {}", e))?;
+    let sk = secp256k1::SecretKey::from_slice(&privkey_bytes).map_err(|e| format!("Invalid private key: {}", e))?;
     let kp = secp256k1::Keypair::from_secret_key(&secp, &sk);
     let (xonly, _) = kp.x_only_public_key();
     Ok(hex::encode(xonly.serialize()))

@@ -60,11 +60,7 @@ type Hash = Uint256;
 fn install_cuda_libs() -> bool {
     use std::process::Command;
     // Only meaningful where apt-get exists (Debian/Ubuntu, incl. HiveOS).
-    let has_apt = Command::new("sh")
-        .args(["-c", "command -v apt-get"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let has_apt = Command::new("sh").args(["-c", "command -v apt-get"]).status().map(|s| s.success()).unwrap_or(false);
     if !has_apt {
         error!("CUDA lib auto-install needs apt-get (Debian/Ubuntu) — not found on this system.");
         return false;
@@ -85,11 +81,7 @@ ldconfig
 ldconfig -p | grep -q libcublas.so.12 || { echo "libcublas still not in loader cache"; exit 1; }
 ldconfig -p | grep -q libcurand.so   || { echo "libcurand still not in loader cache"; exit 1; }
 rm -f cuda-keyring.deb"#;
-    Command::new("bash")
-        .args(["-c", script])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    Command::new("bash").args(["-c", script]).status().map(|s| s.success()).unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -129,10 +121,7 @@ fn filter_plugins(dirname: &str) -> Vec<String> {
 /// Power thresholds empirically derived: Xid 32 observed at ≤300W on RTX 3090 with 32B GGUF.
 fn check_gpu_power_limit(needs_high: bool, needs_very_high: bool) {
     let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=power.limit,power.max_limit,memory.total",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=power.limit,power.max_limit,memory.total", "--format=csv,noheader,nounits"])
         .output();
 
     let (current_w, vram_mb) = match output {
@@ -156,9 +145,7 @@ fn check_gpu_power_limit(needs_high: bool, needs_very_high: bool) {
             vram_mb,
             vram_mb / 1024
         );
-        log::error!(
-            "   Use --high (DeepSeek-R1-32B, fits in 24 GB) or --light (TinyLlama only)."
-        );
+        log::error!("   Use --high (DeepSeek-R1-32B, fits in 24 GB) or --light (TinyLlama only).");
         // Non-fatal: let candle fail with its own OOM so the miner logs the actual error.
     }
 
@@ -291,9 +278,7 @@ async fn main() -> Result<(), Error> {
 
         let url_clone = url.clone();
         let api_entries: Vec<ApiEscrowEntry> = tokio::task::spawn_blocking(move || {
-            let response = ureq::get(&url_clone)
-                .call()
-                .map_err(|e| format!("HTTP request failed: {}", e))?;
+            let response = ureq::get(&url_clone).call().map_err(|e| format!("HTTP request failed: {}", e))?;
             serde_json::from_reader::<_, Vec<ApiEscrowEntry>>(response.into_reader())
                 .map_err(|e| format!("JSON parse error: {}", e))
         })
@@ -323,11 +308,7 @@ async fn main() -> Result<(), Error> {
         let json = serde_json::to_string_pretty(&state)?;
         fs::write(&opt.escrow_state_file, &json)?;
 
-        info!(
-            "Recovered {} escrow entries — claimable: {:.4} KRX",
-            count,
-            total_sompi as f64 / 1e8
-        );
+        info!("Recovered {} escrow entries — claimable: {:.4} KRX", count, total_sompi as f64 / 1e8);
         info!("State saved to '{}'.", opt.escrow_state_file);
         return Ok(());
     }
@@ -364,11 +345,7 @@ async fn main() -> Result<(), Error> {
         ]
     } else if opt.high {
         info!("--high mode: loading TinyLlama + DeepSeek-R1-8B + DeepSeek-R1-32B.");
-        &[
-            &keryx_miner::models::TINYLLAMA,
-            &keryx_miner::models::DEEPSEEK_R1_8B,
-            &keryx_miner::models::DEEPSEEK_R1_32B,
-        ]
+        &[&keryx_miner::models::TINYLLAMA, &keryx_miner::models::DEEPSEEK_R1_8B, &keryx_miner::models::DEEPSEEK_R1_32B]
     } else if opt.light {
         info!("--light mode: loading TinyLlama only.");
         &[&keryx_miner::models::TINYLLAMA]
@@ -398,46 +375,48 @@ async fn main() -> Result<(), Error> {
     if opt.cpu_inference {
         info!("--cpu-inference: skipping GPU inference probe (inference runs on CPU).");
     } else {
-    info!("Probing GPU inference (cuBLAS) before mining…");
-    match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
-        Ok(keryx_miner::slm::GpuProbe::Ok) => info!("GPU inference verified — cuBLAS loaded successfully."),
-        Ok(keryx_miner::slm::GpuProbe::NoCuda) => {
-            warn!("No CUDA device detected — inference will run on CPU (small models only, slow).");
-        }
-        Ok(keryx_miner::slm::GpuProbe::CublasMissing) => {
-            warn!("CUDA GPU detected but a CUDA runtime lib is missing — installing them automatically (one-time)…");
-            #[cfg(target_os = "linux")]
-            {
-                let installed = tokio::task::spawn_blocking(install_cuda_libs).await.unwrap_or(false);
-                if !installed {
-                    error!("Automatic CUDA lib install failed — install them manually then restart:");
-                    error!("  apt-get install -y libcublas-12-2 libcurand-12-2");
+        info!("Probing GPU inference (cuBLAS) before mining…");
+        match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
+            Ok(keryx_miner::slm::GpuProbe::Ok) => info!("GPU inference verified — cuBLAS loaded successfully."),
+            Ok(keryx_miner::slm::GpuProbe::NoCuda) => {
+                warn!("No CUDA device detected — inference will run on CPU (small models only, slow).");
+            }
+            Ok(keryx_miner::slm::GpuProbe::CublasMissing) => {
+                warn!(
+                    "CUDA GPU detected but a CUDA runtime lib is missing — installing them automatically (one-time)…"
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    let installed = tokio::task::spawn_blocking(install_cuda_libs).await.unwrap_or(false);
+                    if !installed {
+                        error!("Automatic CUDA lib install failed — install them manually then restart:");
+                        error!("  apt-get install -y libcublas-12-2 libcurand-12-2");
+                        return Err("CUDA runtime libs missing — cannot start OPoI mining".into());
+                    }
+                    // Re-probe in-process. The dynamic loader may still hold a stale cache, so if
+                    // the freshly-installed libs aren't picked up here, exit cleanly and let the
+                    // supervisor (HiveOS/PM2) relaunch us with a fresh loader cache.
+                    match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
+                        Ok(keryx_miner::slm::GpuProbe::Ok) => {
+                            info!("CUDA libs installed — GPU inference verified, starting mining.");
+                        }
+                        _ => {
+                            info!("CUDA libs installed successfully — restarting miner to activate them.");
+                            std::process::exit(0);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    error!("CUDA GPU detected but a CUDA runtime lib failed to load — install the CUDA 12.6 toolkit and restart.");
                     return Err("CUDA runtime libs missing — cannot start OPoI mining".into());
                 }
-                // Re-probe in-process. The dynamic loader may still hold a stale cache, so if
-                // the freshly-installed libs aren't picked up here, exit cleanly and let the
-                // supervisor (HiveOS/PM2) relaunch us with a fresh loader cache.
-                match tokio::task::spawn_blocking(keryx_miner::slm::probe_gpu_inference).await {
-                    Ok(keryx_miner::slm::GpuProbe::Ok) => {
-                        info!("CUDA libs installed — GPU inference verified, starting mining.");
-                    }
-                    _ => {
-                        info!("CUDA libs installed successfully — restarting miner to activate them.");
-                        std::process::exit(0);
-                    }
-                }
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                error!("CUDA GPU detected but a CUDA runtime lib failed to load — install the CUDA 12.6 toolkit and restart.");
-                return Err("CUDA runtime libs missing — cannot start OPoI mining".into());
+            Err(e) => {
+                error!("GPU probe task panicked: {}", e);
+                return Err(e.into());
             }
         }
-        Err(e) => {
-            error!("GPU probe task panicked: {}", e);
-            return Err(e.into());
-        }
-    }
     }
     info!("Found plugins: {:?}", plugins);
     info!("Plugins found {} workers", worker_count);

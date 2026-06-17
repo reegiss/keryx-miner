@@ -13,7 +13,6 @@
 /// Scale convention: each hidden-layer accumulator is right-shifted by
 /// NORM_SHIFT (= 10 bits) to keep activations in a bounded integer range
 /// before being fed into the next layer.
-
 use crate::task::MODEL_SEED;
 
 /// Normalization right-shift applied after each hidden-layer accumulation.
@@ -21,9 +20,9 @@ use crate::task::MODEL_SEED;
 const NORM_SHIFT: u32 = 10;
 
 /// Layer dimensions.
-const N_IN:  usize = 32;
-const N_H1:  usize = 256;
-const N_H2:  usize = 128;
+const N_IN: usize = 32;
+const N_H1: usize = 256;
+const N_H2: usize = 128;
 const N_OUT: usize = 32;
 
 /// He initialization scale for each layer (dimensionless integer units).
@@ -43,9 +42,7 @@ const HE_L3: i64 = 128;
 /// distribution so the fixed-point model is clearly distinct from the f32 one.
 #[inline]
 fn lcg_weight(state: &mut u64, he_scale: i64) -> i32 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
+    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
 
     // Upper 32 bits reinterpreted as i32 → uniform in [-2^31, 2^31).
     let raw = ((*state >> 32) as u32) as i32 as i64;
@@ -76,9 +73,7 @@ pub fn forward(input: &[u8; 32]) -> [u8; 32] {
     let w1 = make_weights(N_H1, N_IN, 0, HE_L1);
     let h1: Vec<i64> = (0..N_H1)
         .map(|i| {
-            let acc: i64 = (0..N_IN)
-                .map(|j| x[j] * w1[i * N_IN + j] as i64)
-                .sum();
+            let acc: i64 = (0..N_IN).map(|j| x[j] * w1[i * N_IN + j] as i64).sum();
             (acc >> NORM_SHIFT).max(0)
         })
         .collect();
@@ -90,9 +85,7 @@ pub fn forward(input: &[u8; 32]) -> [u8; 32] {
     let w2 = make_weights(N_H2, N_H1, 1, HE_L2);
     let h2: Vec<i64> = (0..N_H2)
         .map(|i| {
-            let acc: i64 = (0..N_H1)
-                .map(|j| h1[j] * w2[i * N_H1 + j] as i64)
-                .sum();
+            let acc: i64 = (0..N_H1).map(|j| h1[j] * w2[i * N_H1 + j] as i64).sum();
             (acc >> NORM_SHIFT).max(0)
         })
         .collect();
@@ -102,13 +95,7 @@ pub fn forward(input: &[u8; 32]) -> [u8; 32] {
     // Accumulator worst-case: N_H2 × 23_040 × HE_L3 = 128 × 23_040 × 128 = 377,487,360
     // Fits comfortably in i64.  No normalisation needed — we fold to bytes directly.
     let w3 = make_weights(N_OUT, N_H2, 2, HE_L3);
-    let h3: Vec<i64> = (0..N_OUT)
-        .map(|i| {
-            (0..N_H2)
-                .map(|j| h2[j] * w3[i * N_H2 + j] as i64)
-                .sum()
-        })
-        .collect();
+    let h3: Vec<i64> = (0..N_OUT).map(|i| (0..N_H2).map(|j| h2[j] * w3[i * N_H2 + j] as i64).sum()).collect();
 
     // ── Output → bytes ───────────────────────────────────────────────────────
     //
@@ -163,10 +150,8 @@ mod tests {
         let task = InferenceTask::from_nonce(42);
         let out = forward(&task.input);
         let expected: [u8; 32] = [
-            182, 147, 169, 135, 251, 232, 129,  16,
-            221, 172,  47, 152,   9,  81, 226, 160,
-              1,  54, 235,  28, 221, 139, 125, 111,
-            176, 173, 146,  73, 168, 229, 102, 209,
+            182, 147, 169, 135, 251, 232, 129, 16, 221, 172, 47, 152, 9, 81, 226, 160, 1, 54, 235, 28, 221, 139, 125,
+            111, 176, 173, 146, 73, 168, 229, 102, 209,
         ];
         assert_eq!(out, expected);
         assert_eq!(hex::encode(&out[..8]), "b693a987fbe88110");

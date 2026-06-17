@@ -1,7 +1,7 @@
 use crate::proto::{
     kaspad_message::Payload, GetBlockRequestMessage, GetBlockTemplateRequestMessage, GetInfoRequestMessage,
-    KaspadMessage, NotifyBlockAddedRequestMessage, NotifyNewBlockTemplateRequestMessage, RpcBlock,
-    RpcTransaction, SubmitBlockRequestMessage, SubmitTransactionRequestMessage,
+    KaspadMessage, NotifyBlockAddedRequestMessage, NotifyNewBlockTemplateRequestMessage, RpcBlock, RpcTransaction,
+    SubmitBlockRequestMessage, SubmitTransactionRequestMessage,
 };
 use crate::{
     pow::{self, HeaderHasher},

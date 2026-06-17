@@ -96,7 +96,12 @@ pub struct AiResponsePayload {
 }
 
 impl AiResponsePayload {
-    pub fn new(request_hash: [u8; 32], challenge_window_end: u64, response_ipfs_cid: [u8; 34], response_length: u32) -> Self {
+    pub fn new(
+        request_hash: [u8; 32],
+        challenge_window_end: u64,
+        response_ipfs_cid: [u8; 34],
+        response_length: u32,
+    ) -> Self {
         Self { request_hash, challenge_window_end, response_ipfs_cid, response_length }
     }
 
@@ -213,8 +218,12 @@ fn base58btc_encode(input: &[u8]) -> String {
     }
     let leading_zeros = input.iter().take_while(|&&b| b == 0).count();
     let mut out = String::with_capacity(leading_zeros + digits.len());
-    for _ in 0..leading_zeros { out.push('1'); }
-    for d in digits.iter().rev() { out.push(ALPHABET[*d as usize] as char); }
+    for _ in 0..leading_zeros {
+        out.push('1');
+    }
+    for d in digits.iter().rev() {
+        out.push(ALPHABET[*d as usize] as char);
+    }
     out
 }
 
@@ -224,13 +233,8 @@ mod tests {
 
     #[test]
     fn ai_request_roundtrip() {
-        let req = AiRequestPayload::new(
-            [42u8; 32],
-            256,
-            1_000_000,
-            30_000_000,
-            b"What is the capital of France?".to_vec(),
-        );
+        let req =
+            AiRequestPayload::new([42u8; 32], 256, 1_000_000, 30_000_000, b"What is the capital of France?".to_vec());
         let bytes = req.serialize();
         let parsed = AiRequestPayload::deserialize(&bytes).unwrap();
         assert_eq!(req, parsed);
@@ -238,9 +242,10 @@ mod tests {
 
     #[test]
     fn ai_response_roundtrip() {
-        let cid = [0x12, 0x20, 0xAAu8, 0xBB, 0xCC, 0xDD,
-                   1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
-                   17,18,19,20,21,22,23,24,25,26,27,28,29,30];
+        let cid = [
+            0x12, 0x20, 0xAAu8, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        ];
         let resp = AiResponsePayload::new([7u8; 32], 900_000, cid, 128);
         let bytes = resp.serialize();
         assert_eq!(bytes.len(), AI_RESPONSE_PAYLOAD_LEN);

@@ -5,7 +5,6 @@
 ///   Tags are verified on-chain; collateral is slashed for fraud.
 /// Phase 3 A: AiResponse/AiChallenge as on-chain txs, RocksDB slash state.
 /// Phase 3 B: ZK fraud proof API (Groth16 stub — circuit VK lands in Phase 3 C).
-
 pub mod ai_payload;
 pub mod fraud_proof;
 pub mod model;
@@ -13,13 +12,11 @@ pub mod model_fixed;
 pub mod task;
 
 pub use ai_payload::{
-    AiRequestPayload, AiResponsePayload, AiChallengePayload,
-    MIN_AI_REQUEST_PAYLOAD_LEN, MAX_AI_REQUEST_PAYLOAD_LEN,
-    MIN_AI_RESPONSE_PAYLOAD_LEN, MAX_AI_RESPONSE_PAYLOAD_LEN,
-    MIN_AI_CHALLENGE_PAYLOAD_LEN, MAX_AI_CHALLENGE_PAYLOAD_LEN,
-    SUBNETWORK_ID_AI_REQUEST_HEX, SUBNETWORK_ID_AI_RESPONSE_HEX, SUBNETWORK_ID_AI_CHALLENGE_HEX,
+    AiChallengePayload, AiRequestPayload, AiResponsePayload, MAX_AI_CHALLENGE_PAYLOAD_LEN, MAX_AI_REQUEST_PAYLOAD_LEN,
+    MAX_AI_RESPONSE_PAYLOAD_LEN, MIN_AI_CHALLENGE_PAYLOAD_LEN, MIN_AI_REQUEST_PAYLOAD_LEN, MIN_AI_RESPONSE_PAYLOAD_LEN,
+    SUBNETWORK_ID_AI_CHALLENGE_HEX, SUBNETWORK_ID_AI_REQUEST_HEX, SUBNETWORK_ID_AI_RESPONSE_HEX,
 };
-pub use fraud_proof::{verify_fraud_proof, compute_ai_commitment, FraudProofResult, FRAUD_PROOF_LEN};
+pub use fraud_proof::{compute_ai_commitment, verify_fraud_proof, FraudProofResult, FRAUD_PROOF_LEN};
 
 pub use task::{InferenceResult, InferenceTask};
 
@@ -177,7 +174,7 @@ mod tests {
     fn make_coinbase_payload(nonce: u64, tag: &str) -> Vec<u8> {
         // Binary header: blue_score(8) + subsidy(8) + spk_version(2) + spk_len(1) + spk(34)
         let mut payload = vec![0u8; 19 + 34]; // 53 bytes binary prefix
-        // Append ASCII extra_data
+                                              // Append ASCII extra_data
         let extra = format!("0.2.1/2025-01-01/{:016x}/ai:v1:{}", nonce, tag);
         payload.extend_from_slice(extra.as_bytes());
         payload

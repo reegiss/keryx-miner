@@ -454,7 +454,14 @@ impl MinerManager {
                 challenge_active,
             );
             for (device, rate) in &*hashes_by_worker.lock().unwrap() {
-                Self::log_single_hashrate(rate, format!("Device {}:", device), "0 hash/s", duration, true, challenge_active);
+                Self::log_single_hashrate(
+                    rate,
+                    format!("Device {}:", device),
+                    "0 hash/s",
+                    duration,
+                    true,
+                    challenge_active,
+                );
             }
             last_instant = now;
         }

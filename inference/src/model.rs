@@ -3,7 +3,6 @@
 /// Architecture: 32 → 256 → 128 → 32 (all ReLU except last layer uses tanh-clamp)
 /// Weights are generated at runtime via a seeded LCG — no file I/O, no model download.
 /// Every miner produces identical outputs for identical inputs (fully deterministic).
-
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
 
 use crate::task::MODEL_SEED;

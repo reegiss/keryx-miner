@@ -189,7 +189,10 @@ impl<'gpu> CudaGPUWorker<'gpu> {
                     m
                 }
                 Err(e) => {
-                    info!("GPU #{} falling back to sm_86 PTX (update driver to 570+ for full Blackwell optimisation)", device_id);
+                    info!(
+                        "GPU #{} falling back to sm_86 PTX (update driver to 570+ for full Blackwell optimisation)",
+                        device_id
+                    );
                     load_ptx(PTX_86, "sm_86 (fallback)").map_err(|_| e)?
                 }
             });
@@ -201,7 +204,10 @@ impl<'gpu> CudaGPUWorker<'gpu> {
                     m
                 }
                 Err(e) => {
-                    info!("GPU #{} falling back to sm_86 PTX (update driver to 570+ for full Ada Lovelace optimisation)", device_id);
+                    info!(
+                        "GPU #{} falling back to sm_86 PTX (update driver to 570+ for full Ada Lovelace optimisation)",
+                        device_id
+                    );
                     load_ptx(PTX_86, "sm_86 (fallback)").map_err(|_| e)?
                 }
             });

@@ -17,7 +17,6 @@
 ///   2. Re-compute `model_fixed::forward(request_hash)`.
 ///   3. Compare with `claimed_commitment` from the AiResponseRecord.
 ///   If they differ, the miner published a fraudulent commitment → slash.
-
 use crate::model_fixed;
 
 /// Byte length of a Phase 3 C fraud proof (= the request_hash, 32 bytes).

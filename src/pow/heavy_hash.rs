@@ -39,12 +39,7 @@ pub fn active_salt_version(daa_score: u64) -> u8 {
 }
 
 /// Round constants for wave_mix — same as `WAVE_MIX_KEYS` in matrix.rs.
-const WAVE_MIX_KEYS: [u64; 4] = [
-    0x9e3779b97f4a7c15,
-    0x6c62272e07bb0142,
-    0xb5ad4eceda1ce2a9,
-    0x243f6a8885a308d3,
-];
+const WAVE_MIX_KEYS: [u64; 4] = [0x9e3779b97f4a7c15, 0x6c62272e07bb0142, 0xb5ad4eceda1ce2a9, 0x243f6a8885a308d3];
 
 /// Rotation amounts — same as `WAVE_MIX_ROTATIONS` in matrix.rs.
 const WAVE_MIX_ROTATIONS: [u32; 4] = [17, 31, 47, 13];
