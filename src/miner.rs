@@ -133,6 +133,7 @@ pub fn get_num_cpus(n_cpus: Option<u16>) -> u16 {
 
 const LOG_RATE: Duration = Duration::from_secs(10);
 
+#[allow(dead_code)]
 fn should_upload(last: &mut Option<usize>, current_id: usize) -> bool {
     if *last == Some(current_id) {
         return false;
