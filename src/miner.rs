@@ -257,80 +257,43 @@ impl MinerManager {
                 let mut nonces = vec![0u64; 1];
 
                 let mut state = None;
-                let mut last_uploaded_id: Option<usize> = None;
 
                 loop {
                     nonces[0] = 0;
-
-                    // Block until a work command arrives when idle.
                     if state.is_none() {
                         state = match block_channel.wait_for_change() {
                             Ok(cmd) => match cmd {
                                 Some(WorkerCommand::Job(s)) => Some(s),
-                                Some(WorkerCommand::Close) => return Ok(()),
+                                Some(WorkerCommand::Close) => {return Ok(());}
                                 None => None,
                             },
                             Err(e) => {
-                                info!("{}: GPU thread closed: {}", gpu_work.id(), e.to_string());
+                                info!("{}: GPU thread crashed: {}", gpu_work.id(), e.to_string());
                                 return Ok(());
                             }
                         };
                     }
-
-                    // Lazy upload: only copy constants to GPU when the template actually changed.
-                    if let Some(s) = &state {
-                        if should_upload(&mut last_uploaded_id, s.id) {
+                    let state_ref = match &state {
+                        Some(s) => {
                             s.load_to_gpu(gpu_work);
-                        }
-                        s.pow_gpu(gpu_work);
-                    } else {
-                        continue;
-                    }
-
-                    // sync() waits on the pong stream (previous batch). The ping stream (just launched
-                    // above) runs concurrently on the GPU during this wait.
+                            s
+                        },
+                        None => continue,
+                    };
+                    state_ref.pow_gpu(gpu_work);
                     if let Err(e) = gpu_work.sync() {
-                        warn!("GPU run ignored: {}", e);
-                        continue;
-                    }
-
-                    // Non-blocking check: if a fresh template arrived while the GPU was busy, switch to it
-                    // immediately rather than waiting until the current state is exhausted.
-                    if let Ok(Some(cmd)) = block_channel.get_changed() {
-                        match cmd {
-                            Some(WorkerCommand::Job(s_new)) => {
-                                if let Err(e) = gpu_work.drain() {
-                                    warn!("GPU drain failed on template switch: {}", e);
-                                }
-                                last_uploaded_id = None;
-                                state = Some(s_new);
-                            }
-                            Some(WorkerCommand::Close) => return Ok(()),
-                            None => {
-                                if let Err(e) = gpu_work.drain() {
-                                    warn!("GPU drain failed on sync loss: {}", e);
-                                }
-                                last_uploaded_id = None;
-                                state = None;
-                            }
-                        }
-                        continue;
+                        warn!("CUDA run ignored: {}", e);
+                        continue
                     }
 
                     gpu_work.copy_output_to(&mut nonces)?;
-
                     if nonces[0] != 0 {
-                        let block_seed = state.as_ref().unwrap().generate_block_if_pow(nonces[0]);
-                        if let Some(block_seed) = block_seed {
+                        if let Some(block_seed) = state_ref.generate_block_if_pow(nonces[0]) {
                             match send_channel.blocking_send(block_seed.clone()) {
                                 Ok(()) => block_seed.report_block(),
                                 Err(e) => error!("Failed submitting block: ({})", e.to_string()),
-                            }
+                            };
                             if let BlockSeed::FullBlock(_) = block_seed {
-                                if let Err(e) = gpu_work.drain() {
-                                    warn!("GPU drain failed after full block: {}", e);
-                                }
-                                last_uploaded_id = None;
                                 state = None;
                             }
                             nonces[0] = 0;
@@ -338,17 +301,54 @@ impl MinerManager {
                             worker_hashes_tried.fetch_add(gpu_work.get_workload().try_into().unwrap(), Ordering::AcqRel);
                             continue;
                         } else {
-                            let hash = state.as_ref().unwrap().calculate_pow(nonces[0]);
-                            warn!(
-                                "Something is wrong in GPU results! Got nonce {}, with hash real {:?}  (target: {}*2^196)",
-                                nonces[0], hash.0, state.as_ref().unwrap().target.0[3]
-                            );
+                            let hash = state_ref.calculate_pow(nonces[0]);
+                            warn!("Something is wrong in GPU results! Got nonce {}, with hash real {:?}  (target: {}*2^196)", nonces[0], hash.0, state_ref.target.0[3]);
                             break;
                         }
                     }
 
+                        /*
+                        info!("Output should be: {:02X?}", state_ref.calculate_pow(nonces[0]).to_le_bytes());
+                        info!("We got: {:02X?} (Nonces: {:02X?})", hashes[0], nonces[0].to_le_bytes());
+                        assert!(state_ref.calculate_pow(nonces[0]).to_le_bytes() == hashes[0]);
+                        */
+                        /*
+                        info!("Output should be: {}", state_ref.calculate_pow(nonces[nonces.len()-1]).0[3]);
+                        info!("We got: {} (Nonces: {})", Uint256::from_le_bytes(hashes[nonces.len()-1]).0[3], nonces[nonces.len()-1]);
+                        assert!(state_ref.calculate_pow(nonces[nonces.len()-1]).0[0] == Uint256::from_le_bytes(hashes[nonces.len()-1]).0[0]);
+                         */
+                        /*
+                        if state_ref.calculate_pow(nonces[0]).0[0] != Uint256::from_le_bytes(hashes[0]).0[0] {
+                            gpu_work.sync()?;
+                            let mut nonce_vec = vec![nonces[0]; 1];
+                            nonce_vec.append(&mut vec![0u64; gpu_work.workload-1]);
+                            gpu_work.calculate_pow_hash(&state_ref.pow_hash_header, Some(&nonce_vec));
+                            gpu_work.sync()?;
+                            gpu_work.calculate_matrix_mul(&mut state_ref.matrix.clone().0.as_slice().as_dbuf().unwrap());
+                            gpu_work.sync()?;
+                            gpu_work.calculate_heavy_hash();
+                            gpu_work.sync()?;
+                            let mut hashes2  = vec![[0u8; 32]; out_size];
+                            let mut nonces2= vec![0u64; out_size];
+                            gpu_work.copy_output_to(&mut hashes2, &mut nonces2);
+                            assert!(state_ref.calculate_pow(nonces[0]).to_le_bytes() == hashes2[0]);
+                            assert!(nonces2[0] == nonces[0]);
+                            assert!(hashes2 == hashes);
+                            assert!(false);
+                        }*/
+
                     hashes_tried.fetch_add(gpu_work.get_workload().try_into().unwrap(), Ordering::AcqRel);
                     worker_hashes_tried.fetch_add(gpu_work.get_workload().try_into().unwrap(), Ordering::AcqRel);
+
+                    {
+                        if let Some(new_cmd) = block_channel.get_changed()? {
+                            state = match new_cmd {
+                                Some(WorkerCommand::Job(s)) => Some(s),
+                                Some(WorkerCommand::Close) => {return Ok(());}
+                                None => None,
+                            };
+                        }
+                    }
                 }
                 Ok(())
             })()
