@@ -133,6 +133,14 @@ pub fn get_num_cpus(n_cpus: Option<u16>) -> u16 {
 
 const LOG_RATE: Duration = Duration::from_secs(10);
 
+fn should_upload(last: &mut Option<usize>, current_id: usize) -> bool {
+    if *last == Some(current_id) {
+        return false;
+    }
+    *last = Some(current_id);
+    true
+}
+
 impl MinerManager {
     pub fn new(send_channel: Sender<BlockSeed>, n_cpus: Option<u16>, manager: &PluginManager) -> Self {
         register_freeze_handler();
@@ -534,5 +542,40 @@ mod benches {
                 nonce += 1;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_upload;
+
+    #[test]
+    fn should_upload_first_call_returns_true() {
+        let mut last = None;
+        assert!(should_upload(&mut last, 1));
+        assert_eq!(last, Some(1));
+    }
+
+    #[test]
+    fn should_upload_same_id_skips() {
+        let mut last = None;
+        should_upload(&mut last, 1);
+        assert!(!should_upload(&mut last, 1));
+    }
+
+    #[test]
+    fn should_upload_new_id_returns_true() {
+        let mut last = None;
+        should_upload(&mut last, 1);
+        assert!(should_upload(&mut last, 2));
+        assert_eq!(last, Some(2));
+    }
+
+    #[test]
+    fn should_upload_after_reset_returns_true() {
+        let mut last = Some(5usize);
+        last = None; // simulates state = None after a block is found
+        assert!(should_upload(&mut last, 6));
+        assert_eq!(last, Some(6));
     }
 }
