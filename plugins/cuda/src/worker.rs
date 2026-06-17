@@ -55,32 +55,20 @@ impl<'kernel> Kernel<'kernel> {
 }
 
 pub struct CudaGPUWorker<'gpu> {
-    // NOTE: The order is important! _context must be dropped last.
+    // NOTE: The order is important! context must be closed last
     heavy_hash_kernel: Kernel<'gpu>,
-
-    // Ping stream: where the NEXT kernel launch goes.
-    stream_ping: Stream,
-    start_event_ping: Event,
-    stop_event_ping: Event,
-    rand_state_ping: DeviceBuffer<u64>,
-    final_nonce_ping: DeviceBuffer<u64>,
-    stream_ping_used: bool,
-
-    // Pong stream: the previously launched stream, awaited in sync().
-    stream_pong: Stream,
-    start_event_pong: Event,
-    stop_event_pong: Event,
-    rand_state_pong: DeviceBuffer<u64>,
-    final_nonce_pong: DeviceBuffer<u64>,
-    stream_pong_used: bool,
-
-    /// True once the first copy_output_to() has run; enables sync() to wait on pong.
-    warmed_up: bool,
-
+    stream: Stream,
+    start_event: Event,
+    stop_event: Event,
     _module: Arc<Module>,
+
+    rand_state: DeviceBuffer<u64>,
+    final_nonce_buff: DeviceBuffer<u64>,
+
     device_id: u32,
     pub workload: usize,
     _context: Context,
+
     random: NonceGenEnum,
 }
 
@@ -105,16 +93,16 @@ impl<'gpu> Worker for CudaGPUWorker<'gpu> {
     #[inline(always)]
     fn calculate_hash(&mut self, _nonces: Option<&Vec<u64>>, nonce_mask: u64, nonce_fixed: u64) {
         let func = &self.heavy_hash_kernel.func;
-        let stream = &self.stream_ping;
+        let stream = &self.stream;
         let random: u8 = match self.random {
             NonceGenEnum::Lean => {
-                self.rand_state_ping.copy_from(&[rand::thread_rng().next_u64()]).unwrap();
+                self.rand_state.copy_from(&[rand::thread_rng().next_u64()]).unwrap();
                 0
             }
             NonceGenEnum::Xoshiro => 1,
         };
 
-        self.start_event_ping.record(stream).unwrap();
+        self.start_event.record(stream).unwrap();
         unsafe {
             launch!(
                 func<<<
@@ -124,24 +112,20 @@ impl<'gpu> Worker for CudaGPUWorker<'gpu> {
                     nonce_mask, nonce_fixed,
                     self.workload,
                     random,
-                    self.rand_state_ping.as_device_ptr(),
-                    self.final_nonce_ping.as_device_ptr()
+                    self.rand_state.as_device_ptr(),
+                    self.final_nonce_buff.as_device_ptr()
                 )
             )
             .unwrap(); // We see errors in sync
         }
-        self.stop_event_ping.record(stream).unwrap();
-        self.stream_ping_used = true;
+        self.stop_event.record(stream).unwrap();
     }
 
     #[inline(always)]
     fn sync(&self) -> Result<(), Error> {
-        if !self.warmed_up {
-            // Pong hasn't been used yet (first iteration). Nothing to wait for.
-            return Ok(());
-        }
-        self.stop_event_pong.synchronize()?;
-        if self.stop_event_pong.elapsed_time_f32(&self.start_event_pong)? > 1000. / BPS {
+        //self.stream.synchronize()?;
+        self.stop_event.synchronize()?;
+        if self.stop_event.elapsed_time_f32(&self.start_event)? > 1000. / BPS {
             return Err("Cuda takes longer then block rate. Please reduce your workload.".into());
         }
         Ok(())
@@ -153,42 +137,18 @@ impl<'gpu> Worker for CudaGPUWorker<'gpu> {
 
     #[inline(always)]
     fn copy_output_to(&mut self, nonces: &mut Vec<u64>) -> Result<(), Error> {
-        // On the very first call warmed_up is false: pong was never launched so its
-        // buffer is still zeroed — copy returns 0 which means "no nonce found". Safe.
-        self.final_nonce_pong.copy_to(nonces)?;
-        // Rotate: the stream just launched (ping) becomes the new pong for the next sync().
-        self.swap_buffers();
-        self.warmed_up = true;
+        self.final_nonce_buff.copy_to(nonces)?;
         Ok(())
     }
 
     fn drain(&mut self) -> Result<(), Error> {
-        // Flush whichever streams have been recorded.
-        if self.stream_pong_used {
-            self.stop_event_pong.synchronize()?;
-        }
-        if self.stream_ping_used {
-            self.stop_event_ping.synchronize()?;
-        }
-        self.warmed_up = false;
-        self.stream_ping_used = false;
-        self.stream_pong_used = false;
+        // Placeholder: single-stream; will be replaced with double-buffer drain in Task 5.
+        self.stop_event.synchronize()?;
         Ok(())
     }
 }
 
 impl<'gpu> CudaGPUWorker<'gpu> {
-    /// Rotate ping → pong. After the swap, the stream that was just launched becomes
-    /// pong (will be waited on next sync()), and the idle stream becomes the new ping.
-    fn swap_buffers(&mut self) {
-        std::mem::swap(&mut self.stream_ping, &mut self.stream_pong);
-        std::mem::swap(&mut self.start_event_ping, &mut self.start_event_pong);
-        std::mem::swap(&mut self.stop_event_ping, &mut self.stop_event_pong);
-        std::mem::swap(&mut self.rand_state_ping, &mut self.rand_state_pong);
-        std::mem::swap(&mut self.final_nonce_ping, &mut self.final_nonce_pong);
-        std::mem::swap(&mut self.stream_ping_used, &mut self.stream_pong_used);
-    }
-
     pub fn new(
         device_id: u32,
         workload: f32,
@@ -284,8 +244,7 @@ impl<'gpu> CudaGPUWorker<'gpu> {
             .into());
         }
 
-        let stream_ping = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-        let stream_pong = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         let mut heavy_hash_kernel = Kernel::new(Arc::downgrade(&_module), "heavy_hash")?;
 
@@ -302,67 +261,46 @@ impl<'gpu> CudaGPUWorker<'gpu> {
         info!("GPU #{} Chosen workload: {}", device_id, chosen_workload);
         heavy_hash_kernel.set_workload(chosen_workload);
 
-        // Two independent xoshiro rand-state buffers, each covering `chosen_workload` threads.
-        // iter_jump_state() advances by long_jump() (2^192 steps) per element, guaranteeing
-        // no overlap between the two sets.
-        let (rand_state_ping, rand_state_pong) = match random {
+        let final_nonce_buff = vec![0u64; 1].as_slice().as_dbuf()?;
+
+        let rand_state: DeviceBuffer<u64> = match random {
             NonceGenEnum::Xoshiro => {
-                info!("Using xoshiro for nonce-generation (double-buffered)");
+                info!("Using xoshiro for nonce-generation");
+                let mut buffer = DeviceBuffer::<u64>::zeroed(4 * (chosen_workload as usize)).unwrap();
+                info!("GPU #{} is generating initial seed. This may take some time.", device_id);
                 let mut seed = [1u64; 4];
                 seed.try_fill(&mut rand::thread_rng())?;
-
-                let all_states: Vec<u64> = Xoshiro256StarStar::new(&seed)
-                    .iter_jump_state()
-                    .take(2 * chosen_workload as usize)
-                    .flatten()
-                    .collect();
-
-                let mid = 4 * chosen_workload as usize;
-                let mut buf_ping = DeviceBuffer::<u64>::zeroed(mid)?;
-                let mut buf_pong = DeviceBuffer::<u64>::zeroed(mid)?;
-                buf_ping.copy_from(&all_states[..mid])?;
-                buf_pong.copy_from(&all_states[mid..])?;
-                info!("GPU #{} double-buffer xoshiro states initialised", device_id);
-                (buf_ping, buf_pong)
+                buffer.copy_from(
+                    Xoshiro256StarStar::new(&seed)
+                        .iter_jump_state()
+                        .take(chosen_workload as usize)
+                        .flatten()
+                        .collect::<Vec<u64>>()
+                        .as_slice(),
+                )?;
+                info!("GPU #{} initialized", device_id);
+                buffer
             }
             NonceGenEnum::Lean => {
-                info!("Using lean nonce-generation (double-buffered)");
-                let s0 = rand::thread_rng().next_u64();
-                let s1 = rand::thread_rng().next_u64();
-                let mut buf_ping = DeviceBuffer::<u64>::zeroed(1)?;
-                let mut buf_pong = DeviceBuffer::<u64>::zeroed(1)?;
-                buf_ping.copy_from(&[s0])?;
-                buf_pong.copy_from(&[s1])?;
-                (buf_ping, buf_pong)
+                info!("Using lean nonce-generation");
+                let mut buffer = DeviceBuffer::<u64>::zeroed(1).unwrap();
+                let seed = rand::thread_rng().next_u64();
+                buffer.copy_from(&[seed])?;
+                buffer
             }
         };
-
-        let final_nonce_ping = vec![0u64; 1].as_slice().as_dbuf()?;
-        let final_nonce_pong = vec![0u64; 1].as_slice().as_dbuf()?;
-
         Ok(Self {
             device_id,
             _context,
             _module,
+            start_event: Event::new(EventFlags::DEFAULT)?,
+            stop_event: Event::new(EventFlags::DEFAULT)?,
             workload: chosen_workload as usize,
+            stream,
+            rand_state,
+            final_nonce_buff,
             heavy_hash_kernel,
             random,
-
-            stream_ping,
-            start_event_ping: Event::new(EventFlags::DEFAULT)?,
-            stop_event_ping: Event::new(EventFlags::DEFAULT)?,
-            rand_state_ping,
-            final_nonce_ping,
-            stream_ping_used: false,
-
-            stream_pong,
-            start_event_pong: Event::new(EventFlags::DEFAULT)?,
-            stop_event_pong: Event::new(EventFlags::DEFAULT)?,
-            rand_state_pong,
-            final_nonce_pong,
-            stream_pong_used: false,
-
-            warmed_up: false,
         })
     }
 }
