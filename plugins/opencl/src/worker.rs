@@ -152,6 +152,11 @@ impl Worker for OpenCLGPUWorker {
             .unwrap();
         Ok(())
     }
+
+    fn drain(&mut self) -> Result<(), Error> {
+        // Single-stream worker; sync() already waits for the queue to finish.
+        self.sync()
+    }
 }
 
 impl OpenCLGPUWorker {

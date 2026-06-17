@@ -121,6 +121,9 @@ pub trait Worker {
 
     fn get_workload(&self) -> usize;
     fn copy_output_to(&mut self, nonces: &mut Vec<u64>) -> Result<(), Error>;
+
+    /// Flush all in-flight GPU work before re-uploading constant memory.
+    fn drain(&mut self) -> Result<(), Error>;
 }
 
 pub fn load_plugins<'help>(
