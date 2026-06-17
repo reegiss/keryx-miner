@@ -641,7 +641,7 @@ pub fn load_and_run_inference(model_id: &[u8; 32], prompt: &str, max_tokens: usi
             }
         };
 
-        let needs_load = guard.as_ref().map_or(true, |e| &e.model_id != model_id);
+        let needs_load = guard.as_ref().is_none_or(|e| &e.model_id != model_id);
         if needs_load {
             if let Some(ref old) = *guard {
                 log::info!("SlmEngine: evicting '{}' to load '{}'", old.name, spec.name);

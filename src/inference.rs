@@ -1,8 +1,8 @@
-/// OPoI inference module — Phase 2.
-///
-/// Detects AiRequest TXs (subnetwork 0x03) in block templates, runs SLM
-/// inference, and embeds the OPoI tag in the coinbase extra_data.
-/// Tag computation delegates to `keryx-inference` (fixed-point MLP, bit-exact).
+//! OPoI inference module — Phase 2.
+//!
+//! Detects AiRequest TXs (subnetwork 0x03) in block templates, runs SLM
+//! inference, and embeds the OPoI tag in the coinbase extra_data.
+//! Tag computation delegates to `keryx-inference` (fixed-point MLP, bit-exact).
 
 /// Compute the Phase-2 OPoI tag for a coinbase.
 pub fn compute_opoi_tag(nonce_hex: &str) -> String {

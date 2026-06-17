@@ -9,10 +9,6 @@ pub struct Xoshiro256StarStarStateIter {
     current: Xoshiro256StarStar,
 }
 
-fn rotl(x: u64, k: i32) -> u64 {
-    (x << k) | (x >> (64 - k))
-}
-
 impl Xoshiro256StarStar {
     pub fn new(seed: &[u64; 4]) -> Self {
         let mut state = [0u64; 4];
@@ -21,7 +17,7 @@ impl Xoshiro256StarStar {
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        let result = u64::wrapping_mul(rotl(u64::wrapping_mul(self.state[1], 5), 7), 9);
+        let result = u64::wrapping_mul(self.state[1].wrapping_mul(5).rotate_left(7), 9);
         let t = self.state[1] << 17;
 
         self.state[2] ^= self.state[0];
@@ -31,7 +27,7 @@ impl Xoshiro256StarStar {
 
         self.state[2] ^= t;
 
-        self.state[3] = rotl(self.state[3], 45);
+        self.state[3] = self.state[3].rotate_left(45);
 
         result
     }

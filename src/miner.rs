@@ -581,8 +581,7 @@ mod tests {
 
     #[test]
     fn should_upload_after_reset_returns_true() {
-        let mut last = Some(5usize);
-        last = None; // simulates state = None after a block is found
+        let mut last: Option<usize> = None; // simulates state after a block is found (reset)
         assert!(should_upload(&mut last, 6));
         assert_eq!(last, Some(6));
     }

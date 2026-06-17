@@ -25,6 +25,7 @@ impl PluginManager {
         Self { plugins: Vec::new(), loaded_libraries: Vec::new() }
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) unsafe fn load_single_plugin<'help>(
         &mut self,
         app: clap::App<'help>,
