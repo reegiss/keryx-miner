@@ -22,9 +22,9 @@ jobs:
           override: true
 
       - name: Install cuda
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.2.2'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
@@ -78,17 +78,17 @@ jobs:
 
       - name: Install CUDA Linux
         if: runner.os == 'Linux'
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.2.2'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Install CUDA Windows
         if: runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.5.1'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
@@ -178,17 +178,17 @@ jobs:
 
       - name: Install CUDA Linux
         if: runner.os == 'Linux'
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.2.2'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
       - name: Install CUDA Windows
         if: runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.5.1'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
@@ -262,9 +262,9 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install cuda
-        uses: Jimver/cuda-toolkit@v0.2.8
+        uses: Jimver/cuda-toolkit@v0.2.15
         with:
-          cuda: '11.2.2'
+          cuda: '12.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
 
