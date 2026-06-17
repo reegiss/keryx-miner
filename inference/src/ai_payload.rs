@@ -1,7 +1,7 @@
-/// On-chain AI request/response payload types.
-///
-/// Shared between the consensus validator (node) and the miner so both
-/// sides always agree on the binary layout.
+//! On-chain AI request/response payload types.
+//!
+//! Shared between the consensus validator (node) and the miner so both
+//! sides always agree on the binary layout.
 
 /// Binary payload layout for `SUBNETWORK_ID_AI_REQUEST` transactions:
 /// `[model_id: 32] [max_tokens: 4 LE] [inference_reward: 8 LE] [priority_fee: 8 LE] [prompt…]`
@@ -242,9 +242,9 @@ mod tests {
 
     #[test]
     fn ai_response_roundtrip() {
-        let cid = [
-            0x12, 0x20, 0xAAu8, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        let cid: [u8; 34] = [
+            0x12, 0x20, 0xAA, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24, 25, 26, 27, 28,
         ];
         let resp = AiResponsePayload::new([7u8; 32], 900_000, cid, 128);
         let bytes = resp.serialize();

@@ -16,6 +16,7 @@
 ///   1. Confirm it matches the `request_hash` stored in the AiResponseRecord.
 ///   2. Re-compute `model_fixed::forward(request_hash)`.
 ///   3. Compare with `claimed_commitment` from the AiResponseRecord.
+///
 ///   If they differ, the miner published a fraudulent commitment → slash.
 use crate::model_fixed;
 

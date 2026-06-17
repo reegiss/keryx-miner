@@ -97,6 +97,8 @@ jobs:
       - name: Set up MSVC for nvcc (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2019'
 
       - name: Cache
         uses: actions/cache@v4
@@ -201,6 +203,8 @@ jobs:
       - name: Set up MSVC for nvcc (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2019'
 
       - name: Cache
         uses: actions/cache@v4
