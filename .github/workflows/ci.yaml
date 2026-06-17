@@ -6,7 +6,7 @@ jobs:
 
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
+        os: [ ubuntu-22.04, windows-latest ]
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -105,12 +105,16 @@ jobs:
 
       - name: Run cargo test regular features
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: -p keryx-miner
 
       - name: Run cargo test no asm
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: -p keryx-miner --features=no-asm
@@ -118,18 +122,24 @@ jobs:
 
       - name: Run cargo test no parking_lot
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: -p keryx-miner --no-default-features
 
       - name: Run cargo test shuttle
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: -p keryx-miner --no-default-features --features=shuttle
 
       - name: Run cargo test for keryxopencl
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: -p keryxopencl
@@ -141,7 +151,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
+        os: [ ubuntu-22.04, windows-latest ]
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -195,37 +205,47 @@ jobs:
 
       - name: Run cargo test release regular features
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: --release -p keryx-miner
 
       - name: Run cargo test release no asm
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: --features=no-asm --release -p keryx-miner
 
       - name: Run cargo test release no parking_lot
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: --no-default-features --release -p keryx-miner
 
       - name: Run cargo test release shuttle
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: --no-default-features --features=shuttle --release -p keryx-miner
 
       - name: Run cargo test for keryxopencl
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: test
           args: --release -p keryxopencl
 
   lints:
     name: Lints
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -268,6 +288,8 @@ jobs:
 
       - name: Run cargo clippy
         uses: actions-rs/cargo@v1
+        env:
+          CUDA_COMPUTE_CAP: '86'
         with:
           command: clippy
           args: --tests -- -D warnings
